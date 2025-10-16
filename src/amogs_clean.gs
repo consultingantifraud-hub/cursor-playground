@@ -667,6 +667,27 @@ function testLogging() {
   console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
+// Функция для просмотра всех событий
+function logEvents() {
+  try {
+    const timeFrom = Math.floor((new Date().getTime() - 150 * 60 * 1000) / 1000);
+    let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
+    let allEvents = [];
+    
+    while (true) {
+      const response = amoRequest(url);
+      if (!response?._embedded?.events) break;
+      allEvents = allEvents.concat(response._embedded.events);
+      url = response._links?.next?.href || '';
+      if (!url) break;
+    }
+    
+    console.log('Полные события:', JSON.stringify(allEvents, null, 2));
+  } catch (error) {
+    console.error('❌ Ошибка логирования событий:', error.message);
+  }
+}
+
 function fullExport() {
   console.log('🚀 ПОЛНАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 30 ДНЕЙ');
   return massExportCalls(30);
