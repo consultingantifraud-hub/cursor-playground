@@ -45,28 +45,39 @@ function isCallProcessed(callId) {
 }
 
 function amoRequest(url, method = 'GET', body = null) {
-  const options = {
-    method: method,
-    headers: { 'Authorization': `Bearer ${config.AMO_TOKEN}` },
-    muteHttpExceptions: true,
-    followRedirects: true
-  };
-  
-  if (body) {
-    options.payload = JSON.stringify(body);
-    options.contentType = 'application/json';
-  }
-  
-  const response = UrlFetchApp.fetch(url, options);
-  const statusCode = response.getResponseCode();
-  
-  if (statusCode < 200 || statusCode >= 300) {
-    console.log(`HTTP ${statusCode}: ${response.getContentText()}`);
+  try {
+    const options = {
+      method: method,
+      headers: { 
+        'Authorization': `Bearer ${config.AMO_TOKEN}`,
+        'Accept': 'application/hal+json'
+      },
+      muteHttpExceptions: true,
+      followRedirects: true,
+      timeout: 30000 // 30 секунд таймаут
+    };
+    
+    if (body) {
+      options.payload = JSON.stringify(body);
+      options.contentType = 'application/json';
+    }
+    
+    const response = UrlFetchApp.fetch(url, options);
+    const statusCode = response.getResponseCode();
+    
+    if (statusCode < 200 || statusCode >= 300) {
+      const errorText = response.getContentText();
+      console.log(`❌ HTTP ${statusCode}: ${errorText.slice(0, 200)}`);
+      return null;
+    }
+    
+    const responseText = response.getContentText();
+    return responseText ? JSON.parse(responseText) : null;
+    
+  } catch (error) {
+    console.log(`❌ Ошибка запроса к ${url}:`, error.message);
     return null;
   }
-  
-  const responseText = response.getContentText();
-  return responseText ? JSON.parse(responseText) : null;
 }
 
 function getAmoTasks(leadId) {
@@ -187,22 +198,55 @@ function syncEventsToday() {
   
   let allEvents = [];
   let nextUrl = url;
+  let pageCount = 0;
+  const maxPages = 5; // Ограничиваем количество страниц
   
-  while (nextUrl) {
-    const response = amoRequest(nextUrl);
-    if (!response || !response._embedded) break;
-    
-    allEvents = allEvents.concat(response._embedded.events);
-    nextUrl = response._links.next ? response._links.next.href : null;
+  console.log(`🔄 Начало синхронизации событий с ${new Date(timeFrom * 1000).toLocaleString()}`);
+  
+  while (nextUrl && pageCount < maxPages) {
+    try {
+      pageCount++;
+      console.log(`📄 Обрабатываем страницу ${pageCount}`);
+      
+      const response = amoRequest(nextUrl);
+      if (!response || !response._embedded) {
+        console.log(`⚠️ Нет данных на странице ${pageCount}`);
+        break;
+      }
+      
+      allEvents = allEvents.concat(response._embedded.events);
+      console.log(`✅ Страница ${pageCount}: ${response._embedded.events.length} событий`);
+      
+      nextUrl = response._links.next ? response._links.next.href : null;
+      
+      // Небольшая пауза между запросами
+      Utilities.sleep(100);
+      
+    } catch (error) {
+      console.log(`❌ Ошибка на странице ${pageCount}:`, error.message);
+      break;
+    }
   }
+  
+  console.log(`📊 Всего получено ${allEvents.length} событий за ${pageCount} страниц`);
   
   const calls = allEvents.filter(e => 
     ['outgoing_call', 'incoming_call'].includes(e.type)
   );
   
-  calls.forEach(event => processEvent(event));
+  console.log(`📞 Найдено ${calls.length} звонков`);
   
-  console.log(`Обработано ${calls.length} звонков`);
+  let processed = 0;
+  calls.forEach(event => {
+    try {
+      processEvent(event);
+      processed++;
+    } catch (error) {
+      console.log(`❌ Ошибка обработки события ${event.id}:`, error.message);
+    }
+  });
+  
+  console.log(`✅ Обработано ${processed} звонков`);
 }
 
 function logEvents() {
@@ -223,4 +267,86 @@ function logEvents() {
   events.forEach(event => {
     console.log(`${event.type} - ${event.entity_type} - ${event.id}`);
   });
+}
+
+// ---- Функции для диагностики ------------------------------------------
+function testConnection() {
+  getConfigFromSheet();
+  
+  console.log('🔍 Тестирование подключения к amoCRM');
+  console.log(`Поддомен: ${config.AMO_SUBDOMAIN}`);
+  console.log(`Токен: ${config.AMO_TOKEN ? 'есть' : 'отсутствует'}`);
+  
+  try {
+    const testUrl = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/account`;
+    console.log(`Тестируем URL: ${testUrl}`);
+    
+    const response = amoRequest(testUrl);
+    if (response) {
+      console.log('✅ Подключение успешно');
+      console.log(`Аккаунт: ${response.name || 'неизвестно'}`);
+    } else {
+      console.log('❌ Подключение не удалось');
+    }
+  } catch (error) {
+    console.log('❌ Ошибка подключения:', error.message);
+  }
+}
+
+function syncEventsLastHours(hours = 2) {
+  getConfigFromSheet();
+  
+  const timeFrom = Math.floor((new Date().getTime() - hours * 60 * 60 * 1000) / 1000);
+  const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
+  
+  console.log(`🔄 Синхронизация за последние ${hours} часов`);
+  console.log(`Время начала: ${new Date(timeFrom * 1000).toLocaleString()}`);
+  
+  let allEvents = [];
+  let nextUrl = url;
+  let pageCount = 0;
+  const maxPages = 3; // Ограничиваем для тестирования
+  
+  while (nextUrl && pageCount < maxPages) {
+    try {
+      pageCount++;
+      console.log(`📄 Страница ${pageCount}`);
+      
+      const response = amoRequest(nextUrl);
+      if (!response || !response._embedded) {
+        console.log(`⚠️ Нет данных на странице ${pageCount}`);
+        break;
+      }
+      
+      allEvents = allEvents.concat(response._embedded.events);
+      console.log(`✅ Получено ${response._embedded.events.length} событий`);
+      
+      nextUrl = response._links.next ? response._links.next.href : null;
+      Utilities.sleep(200);
+      
+    } catch (error) {
+      console.log(`❌ Ошибка на странице ${pageCount}:`, error.message);
+      break;
+    }
+  }
+  
+  console.log(`📊 Всего событий: ${allEvents.length}`);
+  
+  const calls = allEvents.filter(e => 
+    ['outgoing_call', 'incoming_call'].includes(e.type)
+  );
+  
+  console.log(`📞 Звонков: ${calls.length}`);
+  
+  let processed = 0;
+  calls.forEach(event => {
+    try {
+      processEvent(event);
+      processed++;
+    } catch (error) {
+      console.log(`❌ Ошибка обработки ${event.id}:`, error.message);
+    }
+  });
+  
+  console.log(`✅ Обработано звонков: ${processed}`);
 }
