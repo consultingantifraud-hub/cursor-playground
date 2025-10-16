@@ -8,8 +8,23 @@
 // ---- Совместимый доступ к конфигу из листа "БД" ------------------------
 function getConfigFromSheet() {
   try {
-    // Используем функцию из AMO.gs для единообразия
-    return getConfigFromSheet();
+    // Прямая реализация без рекурсии
+    const dbSheet = SpreadsheetApp.getActive().getSheetByName("БД");
+    if (!dbSheet) throw new Error('Лист "БД" не найден');
+    
+    let subdomain = dbSheet.getRange("B3").getValue();
+    if (subdomain) {
+      subdomain = String(subdomain).trim().replace(/^https?:\/\//i, '').replace(/\.amocrm\.(ru|eu)$/i, '');
+      if (!/^[a-z0-9-]+$/i.test(subdomain)) {
+        throw new Error(`Некорректный поддомен: ${subdomain}`);
+      }
+    }
+    
+    return {
+      AMO_TOKEN: dbSheet.getRange("B2").getValue(),
+      AMO_SUBDOMAIN: subdomain,
+      SHEET_NAME: dbSheet.getRange("B4").getValue()
+    };
   } catch (e) {
     console.error('[ИИ.gs] getConfigFromSheet error:', String(e && e.message || e));
     return null;
