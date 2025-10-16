@@ -125,6 +125,17 @@ function getAmoNotes(entityType, entityId) {
   }
 }
 
+function getAmoNoteById(noteId) {
+  try {
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/notes/${noteId}`;
+    const response = amoRequest(url);
+    return response;
+  } catch (error) {
+    console.log(`Ошибка получения заметки ${noteId}:`, error);
+    return null;
+  }
+}
+
 function isCallNote(note) {
   if (!note) return false;
   
@@ -167,18 +178,25 @@ function processNoteEvent(eventData) {
     return false;
   }
   
-  const note = eventData.value_after?.[0]?.note;
-  if (!note) {
+  const noteId = eventData.value_after?.[0]?.note?.id;
+  if (!noteId) {
+    return false;
+  }
+  
+  // Получаем полную заметку через API
+  const fullNote = getAmoNoteById(noteId);
+  if (!fullNote) {
+    console.log(`❌ Не удалось получить заметку ${noteId}`);
     return false;
   }
   
   // Проверяем, является ли это звонком
-  const isCall = isCallNote(note);
+  const isCall = isCallNote(fullNote);
   if (!isCall) {
     return false;
   }
   
-  const callId = note.id;
+  const callId = fullNote.id;
   if (isCallProcessed(callId)) {
     console.log(`⏭️ Звонок ${callId} уже обработан`);
     return false;
@@ -217,11 +235,11 @@ function processNoteEvent(eventData) {
     leadName: lead.name || 'Без названия',
     contactName: contact ? contact.name : 'Без контакта',
     companyName: company ? company.name : 'Без компании',
-    callType: getCallType(note),
+    callType: getCallType(fullNote),
     callDate: formatTimestamp(eventData.created_at),
-    duration: note.params ? (note.params.duration || 0) : 0,
-    audioUrl: note.params ? (note.params.link || '') : '',
-    callStatus: note.params ? (note.params.call_status || '') : '',
+    duration: fullNote.params ? (fullNote.params.duration || 0) : 0,
+    audioUrl: fullNote.params ? (fullNote.params.link || '') : '',
+    callStatus: fullNote.params ? (fullNote.params.call_status || '') : '',
     responsible: lead.responsible_user_id || 'Неизвестно'
   };
   
