@@ -189,9 +189,76 @@ function getCallType(note) {
   return 'Неизвестно';
 }
 
-function processNoteEvent(eventData) {
-  if (!['note_added', 'common_note_added', 'targeting_in_note_added', 'targeting_out_note_added'].includes(eventData.type)) {
+function processDirectCallEvent(eventData) {
+  const callId = eventData.id;
+  if (isCallProcessed(callId)) {
+    console.log(`⏭️ Звонок ${callId} уже обработан`);
     return false;
+  }
+  
+  const leadId = eventData.entity_id;
+  const lead = getAmoLead(leadId);
+  if (!lead) {
+    console.log(`❌ Не удалось получить сделку ${leadId}`);
+    return false;
+  }
+  
+  // Безопасное получение контакта
+  let contact = null;
+  if (lead._embedded && lead._embedded.contacts && lead._embedded.contacts.length > 0) {
+    try {
+      contact = getAmoContact(lead._embedded.contacts[0].id);
+    } catch (error) {
+      console.log(`⚠️ Ошибка получения контакта: ${error.message}`);
+    }
+  }
+  
+  // Безопасное получение компании
+  let company = null;
+  if (lead._embedded && lead._embedded.companies && lead._embedded.companies.length > 0) {
+    try {
+      company = getAmoCompany(lead._embedded.companies[0].id);
+    } catch (error) {
+      console.log(`⚠️ Ошибка получения компании: ${error.message}`);
+    }
+  }
+  
+  // Определяем тип звонка по типу события
+  let callType = 'Неизвестно';
+  if (eventData.type === 'outgoing_call' || eventData.type === 'call_started') {
+    callType = 'Исходящий';
+  } else if (eventData.type === 'incoming_call' || eventData.type === 'call_ended') {
+    callType = 'Входящий';
+  }
+  
+  const callData = {
+    callId: callId,
+    leadId: leadId,
+    leadName: lead.name || 'Без названия',
+    contactName: contact ? contact.name : 'Без контакта',
+    companyName: company ? company.name : 'Без компании',
+    callType: callType,
+    callDate: formatTimestamp(eventData.created_at),
+    duration: 0, // Для прямых событий длительность может быть недоступна
+    audioUrl: '', // Для прямых событий ссылка может быть недоступна
+    callStatus: eventData.type,
+    responsible: lead.responsible_user_id || 'Неизвестно'
+  };
+  
+  console.log(`✅ Обрабатываем прямой звонок ${callId} для сделки ${leadId}`);
+  appendToSheet(callData);
+  return true;
+}
+
+function processNoteEvent(eventData) {
+  if (!['note_added', 'common_note_added', 'targeting_in_note_added', 'targeting_out_note_added', 'outgoing_call', 'incoming_call', 'call_started', 'call_ended'].includes(eventData.type)) {
+    return false;
+  }
+  
+  // Обрабатываем прямые события звонков
+  if (['outgoing_call', 'incoming_call', 'call_started', 'call_ended'].includes(eventData.type)) {
+    console.log(`📞 Обрабатываем прямое событие звонка: ${eventData.type}`);
+    return processDirectCallEvent(eventData);
   }
   
   // Пробуем получить заметку из события напрямую
@@ -602,12 +669,16 @@ function massExportCalls(days = 7) {
   });
   console.log(`📈 ТИПЫ СОБЫТИЙ:`, eventTypes);
   
-  // Ищем ВСЕ события с заметками
+  // Ищем ВСЕ события с заметками + события звонков
   const noteEvents = allEvents.filter(e => 
     e.type === 'note_added' || 
     e.type === 'common_note_added' ||
     e.type === 'targeting_in_note_added' ||
-    e.type === 'targeting_out_note_added'
+    e.type === 'targeting_out_note_added' ||
+    e.type === 'outgoing_call' ||
+    e.type === 'incoming_call' ||
+    e.type === 'call_started' ||
+    e.type === 'call_ended'
   );
   
   console.log(`📝 НАЙДЕНО ${noteEvents.length} СОБЫТИЙ С ЗАМЕТКАМИ`);
