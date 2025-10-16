@@ -196,10 +196,35 @@ function processDirectCallEvent(eventData) {
     return false;
   }
   
-  const leadId = eventData.entity_id;
-  console.log(`🔍 Получаем сделку ${leadId} для звонка ${callId}`);
+  const entityId = eventData.entity_id;
+  const entityType = eventData.entity_type;
   
-  const lead = getAmoLead(leadId);
+  console.log(`🔍 Обрабатываем звонок ${callId} для ${entityType} ${entityId}`);
+  
+  let lead = null;
+  let leadId = null;
+  
+  if (entityType === 'lead') {
+    // Прямая привязка к сделке
+    leadId = entityId;
+    lead = getAmoLead(leadId);
+  } else if (entityType === 'contact') {
+    // Получаем сделку через контакт
+    console.log(`🔍 Получаем сделки для контакта ${entityId}`);
+    const contact = getAmoContact(entityId);
+    if (contact && contact._embedded && contact._embedded.leads && contact._embedded.leads.length > 0) {
+      leadId = contact._embedded.leads[0].id;
+      lead = getAmoLead(leadId);
+      console.log(`✅ Найдена сделка ${leadId} для контакта ${entityId}`);
+    } else {
+      console.log(`❌ Не найдены сделки для контакта ${entityId} - пропускаем звонок`);
+      return false;
+    }
+  } else {
+    console.log(`❌ Неподдерживаемый тип сущности ${entityType} - пропускаем звонок`);
+    return false;
+  }
+  
   if (!lead) {
     console.log(`❌ Не удалось получить сделку ${leadId} - пропускаем звонок`);
     return false;
