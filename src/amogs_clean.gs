@@ -667,69 +667,92 @@ function testLogging() {
   console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
-// Поиск звонков в заметках за период
-function findCallsInNotes(hours = 24) {
+// Проверка звонков в листе "АМО Звонки"
+function checkCallsInSheet() {
   try {
-    console.log(`🔍 Поиск звонков в заметках за последние ${hours} часов`);
-    writeLog(`Поиск звонков в заметках за последние ${hours} часов`, 'INFO', { script_id: 'findCallsInNotes' });
+    console.log('🔍 Проверка звонков в листе "АМО Звонки"');
+    writeLog('Проверка звонков в листе "АМО Звонки"', 'INFO', { script_id: 'checkCallsInSheet' });
     
-    const timeFrom = Math.floor((new Date().getTime() - hours * 60 * 60 * 1000) / 1000);
-    const timeFromStr = new Date(timeFrom * 1000).toLocaleString();
-    console.log(`⏰ Ищем заметки с ${timeFromStr}`);
+    const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+      .getSheetByName(config.SHEET_NAME);
     
-    // Ищем заметки по сделкам
-    let url = `https://${config.AMO_SUBDOMAIN}/api/v4/leads/notes?filter[created_at][from]=${timeFrom}&limit=250`;
-    let allNotes = [];
-    let pageCount = 0;
-    
-    while (url && pageCount < 10) {
-      pageCount++;
-      console.log(`📄 Страница заметок ${pageCount}`);
-      
-      const response = amoRequest(url);
-      if (!response?._embedded?.items) break;
-      
-      const notes = response._embedded.items;
-      allNotes = allNotes.concat(notes);
-      console.log(`✅ Страница ${pageCount}: ${notes.length} заметок`);
-      
-      url = response._links?.next?.href || '';
+    if (!sheet) {
+      writeLog('Лист "АМО Звонки" не найден', 'ERROR', { script_id: 'checkCallsInSheet' });
+      return;
     }
     
-    console.log(`📊 Всего найдено заметок: ${allNotes.length}`);
-    writeLog(`Всего найдено заметок: ${allNotes.length}`, 'INFO', { script_id: 'findCallsInNotes' });
+    const lastRow = sheet.getLastRow();
+    console.log(`📊 Всего строк в листе: ${lastRow}`);
+    writeLog(`Всего строк в листе: ${lastRow}`, 'INFO', { script_id: 'checkCallsInSheet' });
     
-    // Фильтруем звонки
-    const callNotes = allNotes.filter(note => {
-      const noteType = String(note.note_type || '').toLowerCase();
-      return /^(call_in|call_out)$/i.test(noteType);
+    if (lastRow < 2) {
+      console.log('📊 Лист пуст');
+      writeLog('Лист пуст', 'WARNING', { script_id: 'checkCallsInSheet' });
+      return;
+    }
+    
+    // Проверяем последние 10 строк
+    const startRow = Math.max(2, lastRow - 9);
+    const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn()).getValues();
+    
+    console.log(`📊 Проверяем строки ${startRow}-${lastRow}`);
+    writeLog(`Проверяем строки ${startRow}-${lastRow}`, 'INFO', { script_id: 'checkCallsInSheet' });
+    
+    // Показываем примеры данных
+    data.forEach((row, i) => {
+      const rowNum = startRow + i;
+      console.log(`Строка ${rowNum}:`, {
+        A: row[0], // Дата
+        B: row[1], // Ссылка на запись
+        C: row[2], // ID сделки
+        D: row[3], // Название сделки
+        E: row[4], // Ответственный
+        F: row[5], // Статус
+        G: row[6], // Тип звонка
+        H: row[7], // Длительность
+        I: row[8], // Номер телефона
+        J: row[9], // Имя клиента
+        K: row[10], // Компания
+        L: row[11], // Время начала
+        M: row[12], // Время окончания
+        N: row[13], // Результат
+        O: row[14], // Комментарий
+        P: row[15], // Все поля
+        Q: row[16], // ID контакта
+        R: row[17], // ID компании
+        S: row[18], // ID задачи
+        T: row[19], // ID заметки
+        U: row[20], // ID пользователя
+        V: row[21], // Транскрипция
+        W: row[22], // Оценка
+        X: row[23], // ID события
+        Y: row[24], // Время старта оценки
+        Z: row[25]  // Время окончания оценки
+      });
     });
     
-    console.log(`📞 Найдено звонков в заметках: ${callNotes.length}`);
-    writeLog(`Найдено звонков в заметках: ${callNotes.length}`, 'INFO', { script_id: 'findCallsInNotes' });
+    // Проверяем, есть ли звонки с транскрипцией
+    const callsWithTranscript = data.filter(row => row[21] && row[21].toString().trim().length > 0);
+    console.log(`📞 Звонков с транскрипцией: ${callsWithTranscript.length}`);
+    writeLog(`Звонков с транскрипцией: ${callsWithTranscript.length}`, 'INFO', { script_id: 'checkCallsInSheet' });
     
-    // Показываем примеры звонков
-    if (callNotes.length > 0) {
-      console.log('📞 === ПРИМЕРЫ ЗВОНКОВ ===');
-      callNotes.slice(0, 5).forEach((note, i) => {
-        console.log(`${i+1}. Звонок ID ${note.id}:`, {
-          note_type: note.note_type,
-          entity_id: note.entity_id,
-          entity_type: note.entity_type,
-          created_at: new Date(note.created_at * 1000).toLocaleString(),
-          has_params: !!note.params,
-          params: note.params
-        });
-      });
-    }
+    // Проверяем, есть ли звонки с оценкой
+    const callsWithEvaluation = data.filter(row => row[22] && row[22].toString().trim().length > 0);
+    console.log(`📊 Звонков с оценкой: ${callsWithEvaluation.length}`);
+    writeLog(`Звонков с оценкой: ${callsWithEvaluation.length}`, 'INFO', { script_id: 'checkCallsInSheet' });
     
-    return callNotes;
+    return {
+      totalRows: lastRow,
+      callsWithTranscript: callsWithTranscript.length,
+      callsWithEvaluation: callsWithEvaluation.length,
+      data: data
+    };
     
   } catch (error) {
-    const errorMsg = `Ошибка поиска звонков в заметках: ${error.message}`;
-    writeLog(errorMsg, 'ERROR', { script_id: 'findCallsInNotes' });
+    const errorMsg = `Ошибка проверки листа: ${error.message}`;
+    writeLog(errorMsg, 'ERROR', { script_id: 'checkCallsInSheet' });
     console.error(errorMsg);
-    return [];
+    return null;
   }
 }
 
