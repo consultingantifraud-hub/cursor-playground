@@ -209,15 +209,34 @@ function processDirectCallEvent(eventData) {
     leadId = entityId;
     lead = getAmoLead(leadId);
   } else if (entityType === 'contact') {
-    // Получаем сделку через контакт
-    console.log(`🔍 Получаем сделки для контакта ${entityId}`);
+    // Получаем контакт
+    console.log(`🔍 Получаем контакт ${entityId}`);
     const contact = getAmoContact(entityId);
-    if (contact && contact._embedded && contact._embedded.leads && contact._embedded.leads.length > 0) {
-      leadId = contact._embedded.leads[0].id;
-      lead = getAmoLead(leadId);
-      console.log(`✅ Найдена сделка ${leadId} для контакта ${entityId}`);
+    if (contact) {
+      console.log(`✅ Получен контакт: ${contact.name || 'Без имени'}`);
+      
+      // Пытаемся найти связанную сделку
+      if (contact._embedded && contact._embedded.leads && contact._embedded.leads.length > 0) {
+        leadId = contact._embedded.leads[0].id;
+        lead = getAmoLead(leadId);
+        console.log(`✅ Найдена сделка ${leadId} для контакта ${entityId}`);
+      } else {
+        console.log(`⚠️ У контакта ${entityId} нет связанных сделок - создаем звонок для контакта`);
+        // Создаем минимальную структуру сделки для контакта
+        lead = {
+          id: `contact_${entityId}`,
+          name: `Звонок для ${contact.name || 'Контакт'}`,
+          responsible_user_id: contact.responsible_user_id || 'Неизвестно',
+          _embedded: {
+            responsible: { name: 'Не назначен' },
+            pipeline: { name: 'Без воронки' },
+            status: { name: 'Без статуса' }
+          }
+        };
+        leadId = lead.id;
+      }
     } else {
-      console.log(`❌ Не найдены сделки для контакта ${entityId} - пропускаем звонок`);
+      console.log(`❌ Не удалось получить контакт ${entityId} - пропускаем звонок`);
       return false;
     }
   } else {
