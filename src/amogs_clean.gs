@@ -127,9 +127,25 @@ function getAmoNotes(entityType, entityId) {
 
 function getAmoNoteById(noteId) {
   try {
-    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/notes/${noteId}`;
-    const response = amoRequest(url);
-    return response;
+    // Пробуем разные варианты API endpoint
+    const urls = [
+      `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/notes/${noteId}`,
+      `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/notes/${noteId}`,
+      `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/contacts/notes/${noteId}`,
+      `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/companies/notes/${noteId}`
+    ];
+    
+    for (let i = 0; i < urls.length; i++) {
+      console.log(`🔍 Пробуем URL ${i + 1}: ${urls[i]}`);
+      const response = amoRequest(urls[i]);
+      if (response && !response.error) {
+        console.log(`✅ Заметка ${noteId} найдена через URL ${i + 1}`);
+        return response;
+      }
+    }
+    
+    console.log(`❌ Заметка ${noteId} не найдена ни через один endpoint`);
+    return null;
   } catch (error) {
     console.log(`Ошибка получения заметки ${noteId}:`, error);
     return null;
@@ -178,25 +194,33 @@ function processNoteEvent(eventData) {
     return false;
   }
   
-  const noteId = eventData.value_after?.[0]?.note?.id;
-  if (!noteId) {
-    return false;
-  }
+  // Пробуем получить заметку из события напрямую
+  let note = eventData.value_after?.[0]?.note;
   
-  // Получаем полную заметку через API
-  const fullNote = getAmoNoteById(noteId);
-  if (!fullNote) {
-    console.log(`❌ Не удалось получить заметку ${noteId}`);
-    return false;
+  // Если заметка неполная, пробуем получить через API
+  if (!note || Object.keys(note).length <= 1) {
+    const noteId = note?.id;
+    if (noteId) {
+      console.log(`🔍 Получаем полную заметку ${noteId} через API...`);
+      note = getAmoNoteById(noteId);
+      if (!note) {
+        console.log(`❌ Не удалось получить заметку ${noteId}`);
+        return false;
+      }
+    } else {
+      console.log(`❌ Нет ID заметки в событии`);
+      return false;
+    }
   }
   
   // Проверяем, является ли это звонком
-  const isCall = isCallNote(fullNote);
+  const isCall = isCallNote(note);
   if (!isCall) {
+    console.log(`⏭️ Событие не является звонком (note_type: ${note.note_type})`);
     return false;
   }
   
-  const callId = fullNote.id;
+  const callId = note.id;
   if (isCallProcessed(callId)) {
     console.log(`⏭️ Звонок ${callId} уже обработан`);
     return false;
@@ -235,11 +259,11 @@ function processNoteEvent(eventData) {
     leadName: lead.name || 'Без названия',
     contactName: contact ? contact.name : 'Без контакта',
     companyName: company ? company.name : 'Без компании',
-    callType: getCallType(fullNote),
+    callType: getCallType(note),
     callDate: formatTimestamp(eventData.created_at),
-    duration: fullNote.params ? (fullNote.params.duration || 0) : 0,
-    audioUrl: fullNote.params ? (fullNote.params.link || '') : '',
-    callStatus: fullNote.params ? (fullNote.params.call_status || '') : '',
+    duration: note.params ? (note.params.duration || 0) : 0,
+    audioUrl: note.params ? (note.params.link || '') : '',
+    callStatus: note.params ? (note.params.call_status || '') : '',
     responsible: lead.responsible_user_id || 'Неизвестно'
   };
   
