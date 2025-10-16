@@ -1,482 +1,669 @@
-// ============================== AMO.gs (переписанный) ==============================
-// Сбор событий из amoCRM в таблицу: сделки, заметки, задачи, аудио-ссылка,
-// «Все поля» с фильтрацией. Без общего config-файла. Синглтон-сторож для синка.
-//
-// Ключевые отличия:
-//  - processEvent_: обрабатываем ТОЛЬКО когда соответствующая note реально типа call_in/call_out.
-//  - Сравнение ID заметок как строк (исправляет пропуски из-за типов).
-//  - syncEventsToday(): тащит все события с value_after.note.id по нужным сущностям,
-//    а фильтр «это звонок» делает processEvent_.
-//  - Добавлен разовый сбор за часы: syncEventsLastHours(hours).
-//
-// Требуемые листы/ячейки в «БД»:
-//  B2: AMO_LONG_TERM_TOKEN (Bearer)
-//  B3: AMO_SUBDOMAIN/host (например, 100detaley.amocrm.ru)
-//  B4: SHEET_NAME (например, "АМО Звонки")
-//  Колонки C:D — соответствия статусов звонка (id → текст)
-//  Колонки E:F — соответствия типов задач (id → текст)
-//  Колонка G — список исключаемых полей (по именам)
+// ============================== AMO.gs (МОДЕРНИЗИРОВАННЫЙ) ==============================
+// Основан на рабочем коде, но с исправлениями фильтрации событий и улучшенным логированием
+// Ключевые исправления:
+// 1. Правильная фильтрация событий note_added с note_type call_in/call_out
+// 2. Обработка гибридных звонков (common заметки с аудио)
+// 3. Улучшенное логирование и отладка
+// 4. Синхронизация с другими модулями
 
-// ---- Синглтон для синка -------------------------------------------------
-var SYNC_RUN_KEY = 'RUN_SYNC_EVENTS';
-var SYNC_WALL_MS = 25000; // 25 сек на один прогон
-
-function _beginSingletonRun_(key, wallMs) {
-  var props = PropertiesService.getScriptProperties();
-  var now = Date.now();
-  var raw = props.getProperty(key);
-  if (raw) {
-    var ts = Number(raw) || 0;
-    if (ts && now - ts < wallMs) {
-      console.log('[GUARD] skip ' + key + ' (already running)');
-      return { ok:false, release:function(){} };
+// ---- Конфигурация (улучшенная) -----------------------------------------
+function getConfigFromSheet() {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const configSheet = spreadsheet.getSheetByName("БД");
+    if (!configSheet) throw new Error('Лист "БД" не найден');
+    
+    // Чтение исключений из колонки G
+    const excludedFields = readExcludedFields(configSheet);
+    
+    // Нормализация поддомена
+    let subdomain = configSheet.getRange("B3").getValue();
+    if (subdomain) {
+      subdomain = subdomain.toString().trim().replace(/^https?:\/\//i, '').replace(/\.amocrm\.(ru|eu)$/i, '');
+      if (!/^[a-z0-9-]+$/i.test(subdomain)) {
+        throw new Error(`Некорректный поддомен: ${subdomain}`);
+      }
     }
+    
+    return {
+      AMO_TOKEN: configSheet.getRange("B2").getValue(),
+      AMO_SUBDOMAIN: subdomain,
+      SHEET_NAME: configSheet.getRange("B4").getValue(),
+      SPREADSHEET_ID: spreadsheet.getId(),
+      callStatusMap: Object.fromEntries(
+        configSheet.getRange("C:D").getValues()
+          .filter(row => row[0] && row[1])
+          .map(([id, text]) => [String(id), String(text)])
+      ),
+      taskTypesMap: Object.fromEntries(
+        configSheet.getRange("E:F").getValues()
+          .filter(row => row[0] && row[1])
+          .map(([id, text]) => [String(id), String(text)])
+      ),
+      excludedFields: excludedFields
+    };
+  } catch (error) {
+    console.error('❌ Ошибка конфигурации:', error.message);
+    throw error;
   }
-  props.setProperty(key, String(now));
-  return { ok:true, release:function(){
-    try { PropertiesService.getScriptProperties().deleteProperty(key); } catch(_) {}
-  }};
 }
 
-// ---- Конфиг из листа «БД» ----------------------------------------------
-function getCfg_() {
-  var ss = SpreadsheetApp.getActive();
-  var db = ss.getSheetByName('БД');
-  if (!db) throw new Error('Лист "БД" не найден');
-
-  function _host(v) {
-    var h = String(v || '').trim().replace(/^https?:\/\//i,'').replace(/\/+$/,'');
-    if (!/\.amocrm\.(ru|eu)$/i.test(h)) h += '.amocrm.ru';
-    return h.toLowerCase();
-  }
-
-  return {
-    AMO_TOKEN      : String(db.getRange('B2').getValue() || '').trim(),
-    AMO_HOST       : _host(db.getRange('B3').getValue()),
-    SHEET_NAME     : String(db.getRange('B4').getValue() || '').trim(),
-    SPREADSHEET_ID : SpreadsheetApp.getActive().getId(),
-    callStatusMap  : Object.fromEntries(
-      db.getRange('C:D').getValues()
-        .filter(function(r){ return r[0] && r[1]; })
-        .map(function(r){ return [String(r[0]), String(r[1])]; })
-    ),
-    taskTypesMap   : Object.fromEntries(
-      db.getRange('E:F').getValues()
-        .filter(function(r){ return r[0] && r[1]; })
-        .map(function(r){ return [String(r[0]), String(r[1])]; })
-    ),
-    excludedFields : db.getRange('G2:G').getValues()
-      .map(function(r){ return String(r[0]||'').trim(); })
-      .filter(Boolean)
-  };
-}
-
-// ---- Универсальный запрос к amo ----------------------------------------
-function amoRequest_(host, token, urlPath, opts) {
-  var url = /^https?:\/\//i.test(urlPath) ? urlPath : ('https://' + host + urlPath);
-  opts = opts || {};
-  var options = {
-    method : opts.method || 'get',
-    headers: Object.assign(
-      { 'Authorization': 'Bearer ' + token, 'Accept':'application/hal+json' },
-      opts.headers || {}
-    ),
-    payload: opts.payload ? JSON.stringify(opts.payload) : undefined,
-    contentType: opts.payload ? 'application/json' : undefined,
-    muteHttpExceptions: true,
-    followRedirects: true
-  };
-  var resp = UrlFetchApp.fetch(url, options);
-  var code = resp.getResponseCode();
-  if (code === 204) return null;
-  var txt = resp.getContentText() || '';
-  if (code < 200 || code >= 300) {
-    throw new Error('HTTP ' + code + ' ' + url + ' | ' + txt.slice(0,600));
-  }
-  return txt ? JSON.parse(txt) : null;
+// Чтение исключенных полей
+function readExcludedFields(sheet) {
+  const excludedRange = sheet.getRange("G2:G");
+  const values = excludedRange.getValues();
+  return values
+    .filter(row => row[0] !== "")
+    .map(row => String(row[0]).trim());
 }
 
 // ---- Утилиты ------------------------------------------------------------
-function formatTs_(ts) {
-  if (!ts) return 'Нет данных';
-  return Utilities.formatDate(new Date(ts*1000), 'GMT+3', 'dd.MM.yyyy HH:mm');
+function formatTimestamp(timestamp) {
+  if (!timestamp) return "Нет данных";
+  const date = new Date(timestamp * 1000);
+  return Utilities.formatDate(date, "GMT+3", "dd.MM.yyyy HH:mm");
 }
 
-// Проверка: уже записывали ли звонок (по колонке O = 15-й столбец данных)
-function isCallProcessed_(sheetName, spreadsheetId, callNoteId) {
+// Проверка обработки звонка (улучшенная)
+function isCallProcessed(callNoteId) {
   try {
-    var sheet = SpreadsheetApp.openById(spreadsheetId).getSheetByName(sheetName);
+    const config = getConfigFromSheet();
+    const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+      .getSheetByName(config.SHEET_NAME);
     if (!sheet) return false;
-    var lastRow = sheet.getLastRow();
+    
+    const lastRow = sheet.getLastRow();
     if (lastRow <= 1) return false; // только заголовки или пустой лист
     
-    var rng = sheet.getRange(2, 15, lastRow - 1, 1).getValues(); // O: 15
-    var ids = [].concat.apply([], rng)
-      .map(function(v){ return String(v||'').trim(); })
-      .filter(Boolean);
-    return ids.indexOf(String(callNoteId)) !== -1;
-  } catch (e){
-    console.warn('[CHECK] ' + e);
+    const processedIds = sheet.getRange(2, 15, lastRow - 1, 1)
+      .getValues()
+      .flat()
+      .map(id => String(id || '').trim())
+      .filter(id => id !== '');
+    
+    return processedIds.includes(String(callNoteId));
+  } catch (error) {
+    console.error('❌ Ошибка проверки:', error.message);
     return false;
   }
 }
 
-// ---- Получение сущностей ------------------------------------------------
-function getAmoLead_(cfg, leadId) {
+// ---- API запросы (улучшенные) ------------------------------------------
+function amoRequest(url, method = 'GET', body = null) {
   try {
-    var lead = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/leads/' + leadId + '?with=contacts,companies');
-    if (!lead) return null;
-    lead.responsible = getAmoUser_(cfg, lead.responsible_user_id).name;
-    return lead;
-  } catch(e){ console.warn('[LEAD] ' + e); return null; }
+    const options = {
+      method: method,
+      headers: { 
+        'Authorization': `Bearer ${getConfigFromSheet().AMO_TOKEN}`,
+        'Accept': 'application/hal+json'
+      },
+      muteHttpExceptions: true,
+      followRedirects: true
+    };
+    
+    if (body) {
+      options.payload = JSON.stringify(body);
+      options.contentType = 'application/json';
+    }
+    
+    const response = UrlFetchApp.fetch(url, options);
+    const statusCode = response.getResponseCode();
+    
+    if (statusCode === 204) {
+      console.log(`✅ Пустой ответ (204) для ${url}`);
+      return null;
+    }
+    
+    if (statusCode < 200 || statusCode >= 300) {
+      const errorText = response.getContentText();
+      console.error(`❌ HTTP ${statusCode}: ${errorText.slice(0, 200)}`);
+      throw new Error(`HTTP ${statusCode}: ${errorText.slice(0, 200)}`);
+    }
+    
+    const responseText = response.getContentText();
+    return responseText ? JSON.parse(responseText) : null;
+  } catch (error) {
+    console.error(`❌ Ошибка запроса к ${url}:`, error.message);
+    throw error;
+  }
 }
 
-function getEntityData_(cfg, entityType, entityId) {
+// ---- Получение данных сущностей ----------------------------------------
+function getAmoLead(leadId) {
   try {
-    var entity = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/' + entityType + '/' + entityId);
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}?with=contacts,companies`;
+    const lead = amoRequest(url);
+    if (!lead) return null;
+    lead.responsible = getAmoUser(lead.responsible_user_id).name;
+    return lead;
+  } catch (error) {
+    console.error(`❌ Ошибка сделки ID ${leadId}:`, error.message);
+    return null;
+  }
+}
+
+function getLeadByContact(contactId) {
+  try {
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/contacts/${contactId}/links`;
+    const linksResponse = amoRequest(url);
+    const links = linksResponse?._embedded?.links || [];
+    
+    const leadIds = links
+      .filter(link => link.to_entity_type === 'leads')
+      .map(link => link.to_entity_id);
+    
+    return leadIds.length > 0 ? getAmoLead(leadIds[0]) : null;
+  } catch (error) {
+    console.error(`❌ Ошибка поиска сделок для контакта ${contactId}:`, error.message);
+    return null;
+  }
+}
+
+function getLeadByCompany(companyId) {
+  try {
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/companies/${companyId}/links`;
+    const linksResponse = amoRequest(url);
+    const links = linksResponse?._embedded?.links || [];
+    
+    const leadIds = links
+      .filter(link => link.to_entity_type === 'leads')
+      .map(link => link.to_entity_id);
+    
+    return leadIds.length > 0 ? getAmoLead(leadIds[0]) : null;
+  } catch (error) {
+    console.error(`❌ Ошибка поиска сделок для компании ${companyId}:`, error.message);
+    return null;
+  }
+}
+
+function getEntityData(entityType, entityId) {
+  try {
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/${entityType}/${entityId}`;
+    const entity = amoRequest(url);
     if (!entity) return null;
     return {
       id: entity.id,
       name: entity.name,
-      responsible: getAmoUser_(cfg, entity.responsible_user_id).name,
+      responsible: getAmoUser(entity.responsible_user_id).name,
       custom_fields_values: entity.custom_fields_values || []
     };
-  } catch(e){ console.warn('[ENTITY] ' + entityType + ' ' + entityId + ' ' + e); return null; }
+  } catch (error) {
+    console.error(`❌ Ошибка ${entityType} ID ${entityId}:`, error.message);
+    return null;
+  }
 }
 
-function getLeadByContact_(cfg, contactId) {
+function getAmoNotes(entityType, entityId) {
   try {
-    var links = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/contacts/' + contactId + '/links');
-    var ids = (links?._embedded?.links || [])
-      .filter(function(l){ return l.to_entity_type==='leads'; })
-      .map(function(l){ return l.to_entity_id; });
-    return ids.length ? getAmoLead_(cfg, ids[0]) : null;
-  } catch(e){ console.warn('[LEADS_BY_CONTACT] ' + e); return null; }
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/${entityType}/${entityId}/notes?with=attachments`;
+    const response = amoRequest(url);
+    return response?._embedded?.notes || [];
+  } catch (error) {
+    console.error(`❌ Ошибка примечаний для ${entityType} ID ${entityId}:`, error.message);
+    return [];
+  }
 }
 
-function getLeadByCompany_(cfg, companyId) {
+function getAmoPipeline(pipelineId) {
   try {
-    var links = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/companies/' + companyId + '/links');
-    var ids = (links?._embedded?.links || [])
-      .filter(function(l){ return l.to_entity_type==='leads'; })
-      .map(function(l){ return l.to_entity_id; });
-    return ids.length ? getAmoLead_(cfg, ids[0]) : null;
-  } catch(e){ console.warn('[LEADS_BY_COMPANY] ' + e); return null; }
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines`;
+    const pipelines = amoRequest(url)?._embedded?.pipelines || [];
+    return pipelines.find(p => p.id === pipelineId) || { id: pipelineId, name: "Неизвестная воронка" };
+  } catch (error) {
+    console.error(`❌ Ошибка воронки ID ${pipelineId}:`, error.message);
+    return { id: pipelineId, name: "Неизвестная воронка" };
+  }
 }
 
-function getAmoNotes_(cfg, entityType, entityId) {
+function getAmoStatus(statusId, pipelineId) {
   try {
-    var resp = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/' + entityType + '/' + entityId + '/notes?with=attachments');
-    return resp?._embedded?.notes || [];
-  } catch(e){ console.warn('[NOTES] ' + e); return []; }
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines`;
+    const pipelines = amoRequest(url)?._embedded?.pipelines || [];
+    const pipeline = pipelines.find(p => p.id === pipelineId);
+    const statuses = pipeline?._embedded?.statuses || [];
+    return statuses.find(s => s.id === statusId) || { id: statusId, name: "Неизвестный статус" };
+  } catch (error) {
+    console.error(`❌ Ошибка статуса ID ${statusId}:`, error.message);
+    return { id: statusId, name: "Неизвестный статус" };
+  }
 }
 
-function getAmoPipeline_(cfg, pipelineId) {
+function getAmoUser(userId) {
   try {
-    var resp = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/leads/pipelines');
-    var p = (resp?._embedded?.pipelines || []).find(function(x){ return x.id === pipelineId; });
-    return p || { id:pipelineId, name:'Неизвестная воронка' };
-  } catch(e){ return { id:pipelineId, name:'Неизвестная воронка' }; }
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/users/${userId}`;
+    const user = amoRequest(url);
+    return user ? {
+      id: user.id,
+      name: user.name || "Неизвестный пользователь"
+    } : { id: userId, name: "Неизвестный пользователь" };
+  } catch (error) {
+    console.error(`❌ Ошибка пользователя ID ${userId}:`, error.message);
+    return { id: userId, name: "Неизвестный пользователь" };
+  }
 }
 
-function getAmoStatus_(cfg, statusId, pipelineId) {
-  try {
-    var resp = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/leads/pipelines');
-    var p = (resp?._embedded?.pipelines || []).find(function(x){ return x.id === pipelineId; });
-    var s = (p?._embedded?.statuses || []).find(function(st){ return st.id === statusId; });
-    return s || { id:statusId, name:'Неизвестный статус' };
-  } catch(e){ return { id:statusId, name:'Неизвестный статус' }; }
-}
-
-function getAmoUser_(cfg, userId) {
-  try {
-    var u = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, '/api/v4/users/' + userId);
-    return u ? { id:u.id, name: u.name || 'Неизвестный пользователь' } : { id:userId, name:'Неизвестный пользователь' };
-  } catch(e){ return { id:userId, name:'Неизвестный пользователь' }; }
-}
-
-// ---- Сбор «всех полей» с фильтрацией -----------------------------------
-function getAllEntityFields_(cfg, lead) {
-  try {
-    var out = [];
-    out.push('--- Сделка ---');
-    out.push('ID: ' + lead.id);
-    out.push('Ответственный: ' + getAmoUser_(cfg, lead.responsible_user_id).name);
-
-    var dealFields = (lead.custom_fields_values || []).map(function(field){
-      var nm = field.field_name;
-      if (cfg.excludedFields.indexOf(nm) !== -1) return null;
-      var v = (field.values||[]).map(function(x){ return x.value; }).filter(Boolean).join(', ');
-      return v ? (nm + ': ' + v) : null;
-    }).filter(Boolean);
-    Array.prototype.push.apply(out, dealFields);
-
-    if (lead._embedded && lead._embedded.contacts && lead._embedded.contacts.length) {
-      lead._embedded.contacts.forEach(function(c){
-        var contact = getEntityData_(cfg,'contacts', c.id);
-        if (contact) {
-          out.push('--- Контакт ---');
-          out.push('ID: ' + contact.id);
-          out.push('Ответственный: ' + contact.responsible);
-          var cf = (contact.custom_fields_values||[]).map(function(f){
-            var nm = f.field_name;
-            if (cfg.excludedFields.indexOf(nm) !== -1) return null;
-            var v = (f.values||[]).map(function(x){ return x.value; }).filter(Boolean).join(', ');
-            return v ? (nm + ': ' + v) : null;
-          }).filter(Boolean);
-          Array.prototype.push.apply(out, cf);
-        }
-      });
-    }
-
-    if (lead._embedded && lead._embedded.companies && lead._embedded.companies.length) {
-      lead._embedded.companies.forEach(function(c){
-        var company = getEntityData_(cfg,'companies', c.id);
-        if (company) {
-          out.push('--- Компания ---');
-          out.push('ID: ' + company.id);
-          out.push('Ответственный: ' + company.responsible);
-          var cf = (company.custom_fields_values||[]).map(function(f){
-            var nm = f.field_name;
-            if (cfg.excludedFields.indexOf(nm) !== -1) return null;
-            var v = (f.values||[]).map(function(x){ return x.value; }).filter(Boolean).join(', ');
-            return v ? (nm + ': ' + v) : null;
-          }).filter(Boolean);
-          Array.prototype.push.apply(out, cf);
-        }
-      });
-    }
-    return out.join('\n') || 'Нет данных';
-  } catch(e){ console.warn('[ALL_FIELDS] ' + e); return 'Ошибка'; }
-}
-
-// ---- Запись в таблицу ---------------------------------------------------
-function appendToSheet_(cfg, rowData) {
-  try {
-    var sh = SpreadsheetApp.openById(cfg.SPREADSHEET_ID).getSheetByName(cfg.SHEET_NAME);
-    if (!sh) throw new Error('Лист не найден');
-    sh.appendRow(rowData);
-  } catch(e){ console.error('[APPEND] ' + e); }
-}
-
-// ---- Задачи по сделке ---------------------------------------------------
-function getAmoTasks_(cfg, leadId) {
-  try {
-    var url = '/api/v4/tasks?filter[entity_id]=' + leadId + '&filter[entity_type]=leads';
-    var resp = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, url);
-    var tasks = resp?._embedded?.tasks || [];
-    return tasks.map(function(task){
-      var typ = cfg.taskTypesMap[String(task.task_type_id)] || ('Неизвестный тип (' + task.task_type_id + ')');
-      var due = formatTs_(task.complete_till);
-      var st  = task.is_completed === true ? 'Выполнена'
-              : (task.is_completed === false ? 'Не выполнена' : 'Статус не определен');
-      return '• ' + typ + ': ' + (task.text || 'Нет текста') + '\n  Срок: ' + due + '\n  Статус: ' + st;
-    }).join('\n') || 'Нет задач';
-  } catch(e){ console.warn('[TASKS] ' + e); return 'Ошибка при получении задач'; }
-}
-
-// ---- Проверка: является ли заметка звонком (расширенная) ----------------
-function _isCallNote_(note) {
+// ---- Проверка: является ли заметка звонком (КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ) -----
+function isCallNote(note) {
   if (!note) return false;
-  var noteType = String(note.note_type || '').toLowerCase();
-  var params = note.params || {};
+  const noteType = String(note.note_type || '').toLowerCase();
+  const params = note.params || {};
   
   // Стандартные типы звонков
   if (/^(call_in|call_out)$/i.test(noteType)) return true;
   
   // Гибридные звонки: common заметки с признаками звонка
   if (noteType === 'common') {
-    var hasLink = params.link && /^https?:\/\//i.test(String(params.link));
-    var hasDuration = params.duration && Number(params.duration) > 0;
-    var hasCallStatus = params.call_status !== undefined;
+    const hasLink = params.link && /^https?:\/\//i.test(String(params.link));
+    const hasDuration = params.duration && Number(params.duration) > 0;
+    const hasCallStatus = params.call_status !== undefined;
     return hasLink || hasDuration || hasCallStatus;
   }
   
   return false;
 }
 
-// ---- Обработка одного события (строго только звонок) --------------------
-function processEvent_(cfg, eventData) {
+// ---- Получение задач для сделки ----------------------------------------
+function getAmoTasks(leadId) {
   try {
-    var callNoteId = eventData && eventData.value_after && eventData.value_after[0] &&
-                     eventData.value_after[0].note && eventData.value_after[0].note.id;
-    if (!callNoteId) return;
+    const config = getConfigFromSheet();
+    const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/tasks?filter[entity_id]=${leadId}&filter[entity_type]=leads`;
+    const tasksResponse = amoRequest(url);
+    if (!tasksResponse) return 'Нет задач';
+    const tasks = tasksResponse._embedded?.tasks || [];
+    return tasks.map(task => {
+      const taskType = config.taskTypesMap[String(task.task_type_id)] || `Неизвестный тип (${task.task_type_id})`;
+      const dueDate = formatTimestamp(task.complete_till);
+      const status = task.is_completed === true ? 'Выполнена' :
+        (task.is_completed === false ? 'Не выполнена' : 'Статус не определен');
+      return `• ${taskType}: ${task.text || 'Нет текста'}\n  Срок: ${dueDate}\n  Статус: ${status}`;
+    }).join('\n') || 'Нет задач';
+  } catch (error) {
+    console.error(`❌ Ошибка задач для сделки ${leadId}:`, error.message);
+    return 'Ошибка при получении задач';
+  }
+}
 
-    // Сразу отсечём, если этот звонок уже занесён в таблицу
-    if (isCallProcessed_(cfg.SHEET_NAME, cfg.SPREADSHEET_ID, callNoteId)) return;
-
-    // Определяем сделку, к которой привязан объект события
-    var lead = null;
-    var et = String(eventData.entity_type||'').toLowerCase();
-    if (et === 'lead') {
-      lead = getAmoLead_(cfg, eventData.entity_id);
-    } else if (et === 'contact') {
-      lead = getLeadByContact_(cfg, eventData.entity_id);
-    } else if (et === 'company') {
-      lead = getLeadByCompany_(cfg, eventData.entity_id);
-    } else {
-      return; // не наш тип сущности
+// ---- Сбор всех полей из сделки (с фильтрацией) ------------------------
+function getAllEntityFields(lead) {
+  try {
+    const config = getConfigFromSheet();
+    const fields = [];
+    
+    // Поля сделки
+    fields.push('--- Сделка ---');
+    fields.push(`ID: ${lead.id}`);
+    fields.push(`Ответственный: ${getAmoUser(lead.responsible_user_id).name}`);
+    
+    // Фильтрация кастомных полей сделки
+    const customFieldsDeal = (lead.custom_fields_values || [])
+      .map(field => {
+        const fieldName = field.field_name;
+        if (config.excludedFields.includes(fieldName)) return null;
+        const values = field.values
+          .map(v => v.value)
+          .filter(v => v)
+          .join(', ');
+        return values ? `${fieldName}: ${values}` : null;
+      })
+      .filter(Boolean);
+    fields.push(...customFieldsDeal);
+    
+    // Поля контактов
+    if (lead._embedded?.contacts?.length) {
+      lead._embedded.contacts.forEach(contactId => {
+        const contact = getEntityData('contacts', contactId.id);
+        if (contact) {
+          fields.push('--- Контакт ---');
+          fields.push(`ID: ${contact.id}`);
+          fields.push(`Ответственный: ${contact.responsible}`);
+          const customFieldsContact = (contact.custom_fields_values || [])
+            .map(field => {
+              const fieldName = field.field_name;
+              if (config.excludedFields.includes(fieldName)) return null;
+              const values = field.values
+                .map(v => v.value)
+                .filter(v => v)
+                .join(', ');
+              return values ? `${fieldName}: ${values}` : null;
+            })
+            .filter(Boolean);
+          fields.push(...customFieldsContact);
+        }
+      });
     }
-    if (!lead) return;
+    
+    // Поля компаний
+    if (lead._embedded?.companies?.length) {
+      lead._embedded.companies.forEach(companyId => {
+        const company = getEntityData('companies', companyId.id);
+        if (company) {
+          fields.push('--- Компания ---');
+          fields.push(`ID: ${company.id}`);
+          fields.push(`Ответственный: ${company.responsible}`);
+          const customFieldsCompany = (company.custom_fields_values || [])
+            .map(field => {
+              const fieldName = field.field_name;
+              if (config.excludedFields.includes(fieldName)) return null;
+              const values = field.values
+                .map(v => v.value)
+                .filter(v => v)
+                .join(', ');
+              return values ? `${fieldName}: ${values}` : null;
+            })
+            .filter(Boolean);
+          fields.push(...customFieldsCompany);
+        }
+      });
+    }
+    
+    return fields.join('\n') || 'Нет данных';
+  } catch (error) {
+    console.error('❌ Ошибка сбора полей:', error.message);
+    return 'Ошибка';
+  }
+}
 
-    // Берём все заметки сделки и ищем ровно нашу note по id (сравниваем как строки!)
-    var notes = getAmoNotes_(cfg, 'leads', lead.id);
-    var callNote = notes.find(function(n){ return String(n && n.id) === String(callNoteId); });
+// ---- Обработка события (КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ) -------------------------
+function processEvent(eventData) {
+  try {
+    console.log(`📞 Обработка события ID: ${eventData.id}, тип: ${eventData.type}`);
+    
+    // Проверяем, что это событие добавления заметки
+    if (eventData.type !== 'note_added') {
+      console.log(`⏭️ Пропускаем событие типа: ${eventData.type}`);
+      return;
+    }
+    
+    const callNoteId = eventData.value_after?.[0]?.note?.id;
+    if (!callNoteId) {
+      console.log('⏭️ Нет ID заметки в событии');
+      return;
+    }
+    
+    if (isCallProcessed(callNoteId)) {
+      console.log(`⏭️ Звонок ${callNoteId} уже обработан`);
+      return;
+    }
 
-    // Обрабатываем только если note — звонок (расширенная проверка)
-    if (!callNote || !_isCallNote_(callNote)) return;
+    let lead;
+    const entityType = String(eventData.entity_type || '').toLowerCase();
+    
+    switch(entityType) {
+      case 'lead':
+        lead = getAmoLead(eventData.entity_id);
+        break;
+      case 'contact':
+        lead = getLeadByContact(eventData.entity_id);
+        break;
+      case 'company':
+        lead = getLeadByCompany(eventData.entity_id);
+        break;
+      default:
+        console.log(`⏭️ Неизвестный тип сущности: ${entityType}`);
+        return;
+    }
 
-    // Текст примечаний (для контекста)
-    var tasksText = getAmoTasks_(cfg, lead.id);
-    var notesText = (notes.map(function(note){
-      var t = '';
-      switch(note.note_type){
+    if (!lead) {
+      console.log(`⏭️ Не найдена сделка для ${entityType} ID ${eventData.entity_id}`);
+      return;
+    }
+
+    // Получение задач и примечаний
+    const tasksText = getAmoTasks(lead.id);
+    const notes = getAmoNotes('leads', lead.id);
+    const callNote = notes.find(n => String(n.id) === String(callNoteId));
+
+    // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: проверяем, является ли заметка звонком
+    if (!callNote || !isCallNote(callNote)) {
+      console.log(`⏭️ Заметка ${callNoteId} не является звонком (тип: ${callNote?.note_type})`);
+      return;
+    }
+
+    console.log(`✅ Обрабатываем звонок ${callNoteId} для сделки ${lead.id}`);
+
+    // Обработка примечаний
+    let notesText = notes.map(note => {
+      let text = '';
+      switch(note.note_type) {
         case 'common':
-          t = '📝 Примечание: ' + (note.params && note.params.text || '');
-          if (note._embedded && note._embedded.attachments && note._embedded.attachments.length) {
-            t += '\nattachments:\n' + note._embedded.attachments.map(function(a){
-              return '• ' + a.name + ' (' + a.link + ')';
-            }).join('\n');
+          text = `📝 Примечание: ${note.params?.text || ''}`;
+          if (note._embedded?.attachments?.length) {
+            text += `\nattachments:\n${note._embedded.attachments
+              .map(att => `• ${att.name} (${att.link})`)
+              .join('\n')}`;
           }
           break;
         case 'call_out':
         case 'call_in':
-          var dur = (note.params && note.params.duration) ? (' (' + note.params.duration + 'с)') : '';
-          var res = cfg.callStatusMap[String(note.params && note.params.call_status)] || 'Без результата';
-          t = '📞 Звонок' + dur + ': ' + res;
-          if (note.params && note.params.link) t += ' (' + note.params.link + ')';
-          if (note._embedded && note._embedded.attachments && note._embedded.attachments.length) {
-            t += '\nattachments:\n' + note._embedded.attachments.map(function(a){
-              return '• ' + a.name + ' (' + a.link + ')';
-            }).join('\n');
+          const duration = note.params?.duration ? ` (${note.params.duration}с)` : '';
+          const result = getConfigFromSheet().callStatusMap[String(note.params?.call_status)] || 'Без результата';
+          text = `📞 Звонок${duration}: ${result}`;
+          if (note.params?.link) text += ` (${note.params.link})`;
+          if (note._embedded?.attachments?.length) {
+            text += `\nattachments:\n${note._embedded.attachments
+              .map(att => `• ${att.name} (${att.link})`)
+              .join('\n')}`;
           }
           break;
         case 'task':
-          t = '✅ Задача [ID:' + note.id + ']: ' + (note.params && note.params.text || '');
-          t += '\nСтатус: ' + ((note.params && note.params.status) === 1 ? 'Выполнена' : 'Не выполнена');
-          if (note.params && note.params.task_deadline) t += '\nСрок: ' + new Date(note.params.task_deadline*1000);
+          text = `✅ Задача [ID:${note.id}]: ${note.params?.text || ''}`;
+          text += `\nСтатус: ${note.params?.status === 1 ? 'Выполнена' : 'Не выполнена'}`;
+          if (note.params?.task_deadline) {
+            text += `\nСрок: ${new Date(note.params.task_deadline * 1000)}`;
+          }
           break;
         case 'mail':
-          t = '📧 Почта: ' + (note.params && note.params.subject || '');
-          t += '\nОт: ' + (note.params && note.params.from || '');
-          t += '\nСообщение: ' + (note.params && note.params.text || '');
-          if (note.params && note.params.link) t += '\nСвязь: ' + note.params.link;
+          text = `📧 Почта: ${note.params?.subject || ''}`;
+          text += `\nОт: ${note.params?.from || ''}`;
+          text += `\nСообщение: ${note.params?.text || ''}`;
+          if (note.params?.link) text += `\nСвязь: ${note.params.link}`;
           break;
         case 'chat':
-          t = '💬 Чат (' + (note.params && note.params.service || '') + '):';
-          t += '\nСообщение: ' + (note.params && note.params.text || '');
-          if (note.params && note.params.link) t += '\nСвязь: ' + note.params.link;
+          text = `💬 Чат (${note.params?.service || ''}):`;
+          text += `\nСообщение: ${note.params?.text || ''}`;
+          if (note.params?.link) text += `\nСвязь: ${note.params.link}`;
           break;
         default:
-          t = 'Неизвестный тип: ' + note.note_type;
+          text = `Неизвестный тип: ${note.note_type}`;
       }
-      return t;
-    }).join('\n').trim()) || 'Нет примечаний';
+      return text;
+    }).join('\n').trim() || 'Нет примечаний';
 
-    notesText += '\n📌 Задачи в сделке:\n' + tasksText;
+    // Добавляем задачи в примечания
+    notesText += `\n📌 Задачи в сделке:\n${tasksText}`;
 
-    var isOut = String(callNote.note_type||'').toLowerCase() === 'call_out';
-    var row = [
-      new Date((eventData.created_at||Date.now()/1000) * 1000),                        // 1 Время
-      (callNote.params && callNote.params.link) || 'Нет записи',                       // 2 Ссылка
-      lead.name,                                                                       // 3 Сделка
-      getAmoPipeline_(cfg, lead.pipeline_id).name,                                     // 4 Воронка
-      getAmoStatus_(cfg, lead.status_id, lead.pipeline_id).name,                       // 5 Статус
-      lead.id,                                                                         // 6 ID сделки
-      lead.pipeline_id,                                                                // 7 ID воронки
-      lead.status_id,                                                                  // 8 ID статуса
-      lead.responsible_user_id,                                                        // 9 ID ответственного
-      getAmoUser_(cfg, lead.responsible_user_id).name,                                 // 10 Ответственный
-      notesText,                                                                       // 11 Примечания + задачи
-      (callNote.params && callNote.params.duration) || 0,                              // 12 Длительность
-      cfg.callStatusMap[String(callNote.params && callNote.params.call_status)] || 'Без результата', // 13 Результат
-      isOut ? 'Исходящий' : 'Входящий',                                                // 14 Тип
-      callNoteId,                                                                       // 15 ID звонка (note.id)
-      getAllEntityFields_(cfg, lead)                                                   // 16 Все поля
+    // Формируем данные
+    const isOutgoing = String(callNote.note_type || '').toLowerCase() === 'call_out';
+    const rowData = [
+      new Date(eventData.created_at * 1000), // 1. Время
+      callNote?.params?.link || 'Нет записи', // 2. Ссылка
+      lead.name, // 3. Сделка
+      getAmoPipeline(lead.pipeline_id).name, // 4. Воронка
+      getAmoStatus(lead.status_id, lead.pipeline_id).name, // 5. Статус
+      lead.id, // 6. ID сделки
+      lead.pipeline_id, // 7. ID воронки
+      lead.status_id, // 8. ID статуса
+      lead.responsible_user_id, // 9. ID ответственного
+      getAmoUser(lead.responsible_user_id).name, // 10. Ответственный
+      notesText, // 11. Примечания + задачи
+      callNote?.params?.duration || 0, // 12. Длительность
+      getConfigFromSheet().callStatusMap[String(callNote?.params?.call_status)] || 'Без результата', // 13. Результат
+      isOutgoing ? 'Исходящий' : 'Входящий', // 14. Тип
+      callNoteId, // 15. ID звонка
+      getAllEntityFields(lead) // 16. Все поля
     ];
-
-    appendToSheet_(cfg, row);
-  } catch(e){
-    console.error('[EVENT] ' + e);
+    
+    appendToSheet(rowData);
+    console.log(`✅ Звонок ${callNoteId} записан в таблицу`);
+  } catch (error) {
+    console.error(`❌ Ошибка в событии ID ${eventData.id}:`, error.message);
   }
 }
 
-// ---- Основной синк (окно 5 минут; фильтр звонков в processEvent_) -------
+// ---- Запись данных в таблицу -------------------------------------------
+function appendToSheet(rowData) {
+  try {
+    const config = getConfigFromSheet();
+    const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+      .getSheetByName(config.SHEET_NAME);
+    if (!sheet) throw new Error('Лист не найден');
+    sheet.appendRow(rowData);
+    console.log('✅ Данные записаны в таблицу');
+  } catch (error) {
+    console.error('❌ Ошибка записи:', error.message);
+  }
+}
+
+// ---- Основная функция синхронизации (ИСПРАВЛЕННАЯ) --------------------
 function syncEventsToday() {
-  var run = _beginSingletonRun_(SYNC_RUN_KEY, SYNC_WALL_MS);
-  if (!run.ok) return;
   try {
-    var cfg = getCfg_();
-    var sh = SpreadsheetApp.openById(cfg.SPREADSHEET_ID).getSheetByName(cfg.SHEET_NAME);
-    var from = Math.floor((Date.now() - 5*60*1000)/1000); // последние 5 минут
-    var url = '/api/v4/events?filter[created_at][from]=' + from + '&limit=250';
-    var batch = [];
+    console.log('🔄 Начало синхронизации событий');
+    const config = getConfigFromSheet();
+    const timeFrom = Math.floor((new Date().getTime() - 5 * 60 * 1000) / 1000); // последние 5 минут
+    let url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
+    let allEvents = [];
+    let processed = 0;
+    let written = 0;
+    
+    // Получаем все события
     while (url) {
-      var resp = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, url);
-      var chunk = resp && resp._embedded && resp._embedded.events ? resp._embedded.events : [];
-      // Берём события, где есть value_after[].note.id и сущность такая, откуда можно выйти на сделку
-      var useful = chunk.filter(function(e){
-        if (!e || !e.value_after || !e.value_after[0] || !e.value_after[0].note || !e.value_after[0].note.id) return false;
-        var et = String(e.entity_type||'').toLowerCase();
-        return et==='lead' || et==='contact' || et==='company';
-      });
-      batch = batch.concat(useful);
-      url = resp && resp._links && resp._links.next ? (resp._links.next.href || '') : '';
-      if (batch.length > 3000) break; // предохранитель по времени выполнения
+      const response = amoRequest(url);
+      if (!response?._embedded?.events) break;
+      allEvents = allEvents.concat(response._embedded.events);
+      url = response._links?.next?.href || '';
+      if (allEvents.length > 3000) break; // предохранитель
     }
-    console.log('[SYNC] events_with_note=', batch.length);
-    var processed = 0, written = 0;
-    batch.forEach(function(ev){ 
-      var before = sh ? sh.getLastRow() : 0;
-      processEvent_(cfg, ev); 
+    
+    console.log(`📊 Найдено событий: ${allEvents.length}`);
+    
+    // Фильтруем события добавления заметок для нужных сущностей
+    const noteEvents = allEvents.filter(e => {
+      if (e.type !== 'note_added') return false;
+      if (!e.value_after?.[0]?.note?.id) return false;
+      const entityType = String(e.entity_type || '').toLowerCase();
+      return ['lead', 'contact', 'company'].includes(entityType);
+    });
+    
+    console.log(`📝 События с заметками: ${noteEvents.length}`);
+    
+    // Обрабатываем каждое событие
+    noteEvents.forEach(event => {
+      const before = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+        .getSheetByName(config.SHEET_NAME).getLastRow();
+      processEvent(event);
       processed++;
-      if (sh && sh.getLastRow() > before) written++;
+      const after = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+        .getSheetByName(config.SHEET_NAME).getLastRow();
+      if (after > before) written++;
     });
-    console.log('[SYNC] processed=', processed, 'written=', written);
-  } catch(e){
-    console.error('[SYNC] ' + e);
-  } finally {
-    run.release();
+    
+    console.log(`✅ Обработано: ${processed}, записано: ${written}`);
+  } catch (error) {
+    console.error('❌ Ошибка синхронизации:', error.message);
   }
 }
 
-// ---- Разовый сбор за последние N часов ---------------------------------
-function syncEventsLastHours(hours){
-  hours = Number(hours)||3;
-  var run = _beginSingletonRun_(SYNC_RUN_KEY + '_H' + hours, SYNC_WALL_MS);
-  if (!run.ok) return;
+// ---- Разовый сбор за последние N часов --------------------------------
+function syncEventsLastHours(hours) {
   try {
-    var cfg = getCfg_();
-    var from = Math.floor((Date.now() - hours*3600*1000)/1000);
-    _syncEventsFromTs_(cfg, from);
-  } catch(e){ console.error('[SYNC H] ' + e); }
-  finally { run.release(); }
+    hours = Number(hours) || 3;
+    console.log(`🔄 Сбор событий за последние ${hours} часов`);
+    const config = getConfigFromSheet();
+    const timeFrom = Math.floor((new Date().getTime() - hours * 3600 * 1000) / 1000);
+    let url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
+    let allEvents = [];
+    let processed = 0;
+    let written = 0;
+    
+    // Получаем все события
+    while (url) {
+      const response = amoRequest(url);
+      if (!response?._embedded?.events) break;
+      allEvents = allEvents.concat(response._embedded.events);
+      url = response._links?.next?.href || '';
+      if (allEvents.length > 5000) break; // предохранитель
+    }
+    
+    console.log(`📊 Найдено событий: ${allEvents.length}`);
+    
+    // Фильтруем события добавления заметок для нужных сущностей
+    const noteEvents = allEvents.filter(e => {
+      if (e.type !== 'note_added') return false;
+      if (!e.value_after?.[0]?.note?.id) return false;
+      const entityType = String(e.entity_type || '').toLowerCase();
+      return ['lead', 'contact', 'company'].includes(entityType);
+    });
+    
+    console.log(`📝 События с заметками: ${noteEvents.length}`);
+    
+    // Обрабатываем каждое событие
+    noteEvents.forEach(event => {
+      const before = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+        .getSheetByName(config.SHEET_NAME).getLastRow();
+      processEvent(event);
+      processed++;
+      const after = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+        .getSheetByName(config.SHEET_NAME).getLastRow();
+      if (after > before) written++;
+    });
+    
+    console.log(`✅ Обработано: ${processed}, записано: ${written}`);
+  } catch (error) {
+    console.error('❌ Ошибка сбора событий:', error.message);
+  }
 }
 
-// Вспомогательный сканер от отметки времени (сохранит только звонки)
-function _syncEventsFromTs_(cfg, fromTs){
-  var url = '/api/v4/events?filter[created_at][from]=' + fromTs + '&limit=250';
-  var batch = [];
-  while (url) {
-    var resp = amoRequest_(cfg.AMO_HOST, cfg.AMO_TOKEN, url);
-    var chunk = resp && resp._embedded && resp._embedded.events ? resp._embedded.events : [];
-    var useful = chunk.filter(function(e){
-      if (!e || !e.value_after || !e.value_after[0] || !e.value_after[0].note || !e.value_after[0].note.id) return false;
-      var et = String(e.entity_type||'').toLowerCase();
-      return et==='lead' || et==='contact' || et==='company';
+// ---- Логирование событий для отладки ----------------------------------
+function logEvents() {
+  try {
+    console.log('🔍 Логирование событий для отладки');
+    const config = getConfigFromSheet();
+    const timeFrom = Math.floor((new Date().getTime() - 150 * 60 * 1000) / 1000);
+    let url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
+    let allEvents = [];
+    
+    while (url) {
+      const response = amoRequest(url);
+      if (!response?._embedded?.events) break;
+      allEvents = allEvents.concat(response._embedded.events);
+      url = response._links?.next?.href || '';
+      if (allEvents.length > 100) break; // ограничиваем для отладки
+    }
+    
+    console.log(`📊 Всего событий: ${allEvents.length}`);
+    
+    // Показываем типы событий
+    const eventTypes = {};
+    allEvents.forEach(e => {
+      eventTypes[e.type] = (eventTypes[e.type] || 0) + 1;
     });
-    batch = batch.concat(useful);
-    url = resp && resp._links && resp._links.next ? (resp._links.next.href || '') : '';
-    if (batch.length > 5000) break; // предохранитель
+    console.log('📈 Типы событий:', eventTypes);
+    
+    // Показываем события с заметками
+    const noteEvents = allEvents.filter(e => e.type === 'note_added');
+    console.log(`📝 События с заметками: ${noteEvents.length}`);
+    
+    // Показываем первые несколько событий с заметками
+    noteEvents.slice(0, 5).forEach((event, i) => {
+      console.log(`📄 Событие ${i+1}:`, {
+        id: event.id,
+        type: event.type,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        note_id: event.value_after?.[0]?.note?.id,
+        note_type: event.value_after?.[0]?.note?.note_type
+      });
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка логирования событий:', error.message);
   }
-  console.log('[SYNC H] events_with_note=', batch.length);
-  var processed = 0, written = 0;
-  var sh = SpreadsheetApp.openById(cfg.SPREADSHEET_ID).getSheetByName(cfg.SHEET_NAME);
-  batch.forEach(function(ev){ 
-    var before = sh ? sh.getLastRow() : 0;
-    processEvent_(cfg, ev); 
-    processed++;
-    if (sh && sh.getLastRow() > before) written++;
-  });
-  console.log('[SYNC H] processed=', processed, 'written=', written);
 }
