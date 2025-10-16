@@ -10,7 +10,14 @@ const config = {
 function getConfigFromSheet() {
   const sheet = SpreadsheetApp.getActive().getSheetByName("БД");
   config.AMO_TOKEN = sheet.getRange("B2").getValue();
-  config.AMO_SUBDOMAIN = sheet.getRange("B3").getValue();
+  
+  // Нормализация поддомена
+  let subdomain = sheet.getRange("B3").getValue();
+  if (subdomain) {
+    subdomain = String(subdomain).trim().replace(/^https?:\/\//i, '').replace(/\.amocrm\.(ru|eu)$/i, '');
+  }
+  config.AMO_SUBDOMAIN = subdomain;
+  
   config.SHEET_NAME = sheet.getRange("B4").getValue();
   return config;
 }
