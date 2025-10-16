@@ -255,9 +255,24 @@ function syncEventsToday() {
   
   console.log(`📊 Всего получено ${allEvents.length} событий за ${pageCount} страниц`);
   
+  // Диагностика типов событий
+  const eventTypes = {};
+  allEvents.forEach(e => {
+    eventTypes[e.type] = (eventTypes[e.type] || 0) + 1;
+  });
+  console.log(`📈 Типы событий:`, eventTypes);
+  
   // Ищем события с заметками (note_added)
   const noteEvents = allEvents.filter(e => e.type === 'note_added');
   console.log(`📝 Найдено ${noteEvents.length} событий с заметками`);
+  
+  // Показываем примеры событий
+  if (allEvents.length > 0) {
+    console.log(`📄 Примеры событий (первые 5):`);
+    allEvents.slice(0, 5).forEach((event, i) => {
+      console.log(`  ${i+1}. ${event.type} - ${event.entity_type} - ${event.id}`);
+    });
+  }
   
   let processed = 0;
   noteEvents.forEach(event => {
@@ -549,5 +564,57 @@ function debugEventStructure() {
     } else {
       console.log('❌ Сделка не найдена');
     }
+  }
+}
+
+// ---- Функция для детальной диагностики событий ----------------------
+function debugEventsDetailed() {
+  getConfigFromSheet();
+  
+  const timeFrom = Math.floor((new Date().getTime() - 2 * 60 * 60 * 1000) / 1000);
+  const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=50`;
+  
+  console.log('🔍 Детальная диагностика событий');
+  console.log(`Время: ${new Date(timeFrom * 1000).toLocaleString()}`);
+  
+  const response = amoRequest(url);
+  if (!response || !response._embedded) {
+    console.log('❌ Нет событий');
+    return;
+  }
+  
+  const events = response._embedded.events;
+  console.log(`📊 Всего событий: ${events.length}`);
+  
+  // Группируем по типам
+  const eventTypes = {};
+  events.forEach(e => {
+    eventTypes[e.type] = (eventTypes[e.type] || 0) + 1;
+  });
+  
+  console.log('📈 Типы событий:');
+  Object.entries(eventTypes).forEach(([type, count]) => {
+    console.log(`  ${type}: ${count}`);
+  });
+  
+  // Показываем все события
+  console.log('📄 Все события:');
+  events.forEach((event, i) => {
+    console.log(`  ${i+1}. ${event.type} - ${event.entity_type} - ${event.id} - ${new Date(event.created_at * 1000).toLocaleString()}`);
+  });
+  
+  // Ищем события с заметками
+  const noteEvents = events.filter(e => e.type === 'note_added');
+  console.log(`📝 События с заметками: ${noteEvents.length}`);
+  
+  if (noteEvents.length > 0) {
+    console.log('📄 Примеры событий с заметками:');
+    noteEvents.slice(0, 3).forEach((event, i) => {
+      const note = event.value_after?.[0]?.note;
+      console.log(`  ${i+1}. ID: ${event.id}, Note ID: ${note?.id}, Type: ${note?.note_type}`);
+      if (note?.params) {
+        console.log(`     Params: ${JSON.stringify(note.params)}`);
+      }
+    });
   }
 }
