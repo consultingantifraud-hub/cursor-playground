@@ -667,6 +667,72 @@ function testLogging() {
   console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
+// Поиск звонков в заметках за период
+function findCallsInNotes(hours = 24) {
+  try {
+    console.log(`🔍 Поиск звонков в заметках за последние ${hours} часов`);
+    writeLog(`Поиск звонков в заметках за последние ${hours} часов`, 'INFO', { script_id: 'findCallsInNotes' });
+    
+    const timeFrom = Math.floor((new Date().getTime() - hours * 60 * 60 * 1000) / 1000);
+    const timeFromStr = new Date(timeFrom * 1000).toLocaleString();
+    console.log(`⏰ Ищем заметки с ${timeFromStr}`);
+    
+    // Ищем заметки по сделкам
+    let url = `https://${config.AMO_SUBDOMAIN}/api/v4/leads/notes?filter[created_at][from]=${timeFrom}&limit=250`;
+    let allNotes = [];
+    let pageCount = 0;
+    
+    while (url && pageCount < 10) {
+      pageCount++;
+      console.log(`📄 Страница заметок ${pageCount}`);
+      
+      const response = amoRequest(url);
+      if (!response?._embedded?.items) break;
+      
+      const notes = response._embedded.items;
+      allNotes = allNotes.concat(notes);
+      console.log(`✅ Страница ${pageCount}: ${notes.length} заметок`);
+      
+      url = response._links?.next?.href || '';
+    }
+    
+    console.log(`📊 Всего найдено заметок: ${allNotes.length}`);
+    writeLog(`Всего найдено заметок: ${allNotes.length}`, 'INFO', { script_id: 'findCallsInNotes' });
+    
+    // Фильтруем звонки
+    const callNotes = allNotes.filter(note => {
+      const noteType = String(note.note_type || '').toLowerCase();
+      return /^(call_in|call_out)$/i.test(noteType);
+    });
+    
+    console.log(`📞 Найдено звонков в заметках: ${callNotes.length}`);
+    writeLog(`Найдено звонков в заметках: ${callNotes.length}`, 'INFO', { script_id: 'findCallsInNotes' });
+    
+    // Показываем примеры звонков
+    if (callNotes.length > 0) {
+      console.log('📞 === ПРИМЕРЫ ЗВОНКОВ ===');
+      callNotes.slice(0, 5).forEach((note, i) => {
+        console.log(`${i+1}. Звонок ID ${note.id}:`, {
+          note_type: note.note_type,
+          entity_id: note.entity_id,
+          entity_type: note.entity_type,
+          created_at: new Date(note.created_at * 1000).toLocaleString(),
+          has_params: !!note.params,
+          params: note.params
+        });
+      });
+    }
+    
+    return callNotes;
+    
+  } catch (error) {
+    const errorMsg = `Ошибка поиска звонков в заметках: ${error.message}`;
+    writeLog(errorMsg, 'ERROR', { script_id: 'findCallsInNotes' });
+    console.error(errorMsg);
+    return [];
+  }
+}
+
 // Функция для просмотра всех событий (диагностическая)
 function logEvents() {
   try {
