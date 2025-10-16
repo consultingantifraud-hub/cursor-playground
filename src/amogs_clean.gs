@@ -209,7 +209,7 @@ function processEvent(eventData) {
     console.log(`📞 Обработка события ID: ${eventData.id}`);
     const callNoteId = eventData.value_after?.[0]?.note?.id;
     if (!callNoteId || isCallProcessed(callNoteId)) {
-      writeLog(`⏭️ Событие ${eventData.id} уже обработано или нет заметки`, 'INFO');
+      writeLog(`Событие ${eventData.id} уже обработано или нет заметки`, 'INFO', { script_id: 'processEvent' });
       return;
     }
 
@@ -225,12 +225,12 @@ function processEvent(eventData) {
         lead = getLeadByCompany(eventData.entity_id);
         break;
       default:
-        writeLog(`❌ Неизвестный тип сущности: ${eventData.entity_type}`, 'WARNING');
+        writeLog(`Неизвестный тип сущности: ${eventData.entity_type}`, 'WARNING', { script_id: 'processEvent' });
         return;
     }
 
     if (!lead) {
-      writeLog(`❌ Не удалось получить сделку для события ${eventData.id}`, 'WARNING');
+      writeLog(`Не удалось получить сделку для события ${eventData.id}`, 'WARNING', { script_id: 'processEvent' });
       return;
     }
 
@@ -307,10 +307,10 @@ function processEvent(eventData) {
       getAllEntityFields(lead) // 16. Все поля (с фильтрацией)
     ];
     appendToSheet(rowData);
-    writeLog(`✅ Звонок записан в таблицу: ${lead.name} (ID: ${lead.id})`, 'SUCCESS');
+    writeLog(`Звонок записан в таблицу: ${lead.name} (ID: ${lead.id})`, 'SUCCESS', { script_id: 'processEvent' });
   } catch (error) {
-    const errorMsg = `❌ Ошибка в событии ID ${eventData.id}: ${error.message}`;
-    writeLog(errorMsg, 'ERROR');
+    const errorMsg = `Ошибка в событии ID ${eventData.id}: ${error.message}`;
+    writeLog(errorMsg, 'ERROR', { script_id: 'processEvent' });
     console.error(errorMsg);
   }
 }
@@ -433,8 +433,8 @@ function appendToSheet(rowData) {
   }
 }
 
-// Запись логов в лист LOGS
-function writeLog(message, type = 'INFO') {
+// Запись логов в лист LOGS в формате ProTalk
+function writeLog(message, type = 'INFO', additionalData = {}) {
   try {
     const spreadsheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
     let logSheet = spreadsheet.getSheetByName('LOGS');
@@ -442,12 +442,34 @@ function writeLog(message, type = 'INFO') {
     if (!logSheet) {
       // Создаем лист LOGS если его нет
       logSheet = spreadsheet.insertSheet('LOGS');
-      logSheet.getRange('A1:C1').setValues([['Время', 'Тип', 'Сообщение']]);
-      logSheet.getRange('A1:C1').setFontWeight('bold');
+      const headers = [
+        'Timestamp', 'chat_id', 'social_id', 'question', 'ai_reply', 'channel', 
+        'script_id', 'model', 'tokens', 'user_tokens', 'tokens_in', 'tokens_out', 
+        'error_log', 'function_log', 'api_key'
+      ];
+      logSheet.getRange('A1:O1').setValues([headers]);
+      logSheet.getRange('A1:O1').setFontWeight('bold');
     }
     
     const timestamp = new Date();
-    const logData = [timestamp, type, message];
+    const logData = [
+      timestamp,                                    // Timestamp
+      additionalData.chat_id || '',                // chat_id
+      additionalData.social_id || '',              // social_id
+      message,                                     // question (сообщение)
+      additionalData.ai_reply || '',               // ai_reply
+      'amogs_bot',                                 // channel
+      additionalData.script_id || 'syncEvents',    // script_id
+      'gpt-4.1-mini',                             // model
+      additionalData.tokens || 0,                  // tokens
+      additionalData.user_tokens || 0,             // user_tokens
+      additionalData.tokens_in || 0,               // tokens_in
+      additionalData.tokens_out || 0,              // tokens_out
+      type === 'ERROR' ? message : '',             // error_log
+      type === 'INFO' ? message : '',              // function_log
+      additionalData.api_key || ''                 // api_key
+    ];
+    
     logSheet.appendRow(logData);
     
     // Ограничиваем количество строк в логах (оставляем последние 1000)
@@ -465,11 +487,11 @@ function writeLog(message, type = 'INFO') {
 // Основная функция синхронизации
 function syncEventsToday() {
   try {
-    writeLog('🚀 Начало синхронизации событий', 'INFO');
+    writeLog('Начало синхронизации событий', 'INFO', { script_id: 'syncEventsToday' });
     
     const timeFrom = Math.floor((new Date().getTime() - 240 * 60 * 1000) / 1000); // 3 минут
     const timeFromStr = new Date(timeFrom * 1000).toLocaleString();
-    writeLog(`⏰ Поиск событий с ${timeFromStr}`, 'INFO');
+    writeLog(`Поиск событий с ${timeFromStr}`, 'INFO', { script_id: 'syncEventsToday' });
     
     let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
     let allEvents = [];
@@ -477,46 +499,46 @@ function syncEventsToday() {
     
     while (true) {
       pageCount++;
-      writeLog(`📄 Обработка страницы ${pageCount}`, 'INFO');
+      writeLog(`Обработка страницы ${pageCount}`, 'INFO', { script_id: 'syncEventsToday' });
       
       const response = amoRequest(url);
       if (!response?._embedded?.events) {
-        writeLog(`✅ Страница ${pageCount}: 0 событий - завершаем`, 'INFO');
+        writeLog(`Страница ${pageCount}: 0 событий - завершаем`, 'INFO', { script_id: 'syncEventsToday' });
         break;
       }
       
       const events = response._embedded.events;
       allEvents = allEvents.concat(events);
-      writeLog(`✅ Страница ${pageCount}: ${events.length} событий`, 'INFO');
+      writeLog(`Страница ${pageCount}: ${events.length} событий`, 'INFO', { script_id: 'syncEventsToday' });
       
       url = response._links?.next?.href || '';
       if (!url) break;
     }
     
-    writeLog(`📊 Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO');
+    writeLog(`Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO', { script_id: 'syncEventsToday' });
     
     const calls = allEvents.filter(e =>
       ['outgoing_call', 'incoming_call'].includes(e.type)
     );
     
-    writeLog(`📞 Найдено ${calls.length} событий звонков`, 'INFO');
+    writeLog(`Найдено ${calls.length} событий звонков`, 'INFO', { script_id: 'syncEventsToday' });
     
     let processedCount = 0;
     calls.forEach((event, index) => {
       try {
         processEvent(event);
         processedCount++;
-        writeLog(`✅ Обработан звонок ${index + 1}/${calls.length}: ${event.id}`, 'INFO');
+        writeLog(`Обработан звонок ${index + 1}/${calls.length}: ${event.id}`, 'INFO', { script_id: 'processEvent' });
       } catch (error) {
-        writeLog(`❌ Ошибка обработки звонка ${event.id}: ${error.message}`, 'ERROR');
+        writeLog(`Ошибка обработки звонка ${event.id}: ${error.message}`, 'ERROR', { script_id: 'processEvent' });
       }
     });
     
-    writeLog(`🎉 Синхронизация завершена! Обработано звонков: ${processedCount}`, 'SUCCESS');
+    writeLog(`Синхронизация завершена! Обработано звонков: ${processedCount}`, 'SUCCESS', { script_id: 'syncEventsToday' });
     
   } catch (error) {
-    const errorMsg = `❌ Критическая ошибка синхронизации: ${error.message}`;
-    writeLog(errorMsg, 'ERROR');
+    const errorMsg = `Критическая ошибка синхронизации: ${error.message}`;
+    writeLog(errorMsg, 'ERROR', { script_id: 'syncEventsToday' });
     console.error(errorMsg);
   }
 }
@@ -611,16 +633,16 @@ function massExportCalls(days = 7) {
 
 function quickExport() {
   console.log('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ');
-  writeLog('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ', 'INFO');
+  writeLog('БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ', 'INFO', { script_id: 'quickExport' });
   return massExportCallsHours(10);
 }
 
 // Тестовая функция для проверки логов
 function testLogging() {
-  writeLog('🧪 Тестовое сообщение', 'INFO');
-  writeLog('⚠️ Тестовое предупреждение', 'WARNING');
-  writeLog('❌ Тестовая ошибка', 'ERROR');
-  writeLog('✅ Тестовый успех', 'SUCCESS');
+  writeLog('Тестовое сообщение', 'INFO', { script_id: 'testLogging' });
+  writeLog('Тестовое предупреждение', 'WARNING', { script_id: 'testLogging' });
+  writeLog('Тестовая ошибка', 'ERROR', { script_id: 'testLogging' });
+  writeLog('Тестовый успех', 'SUCCESS', { script_id: 'testLogging' });
   console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
