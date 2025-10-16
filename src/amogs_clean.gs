@@ -537,9 +537,10 @@ function massExportCalls(days = 7) {
   let allEvents = [];
   let nextUrl = url;
   let pageCount = 0;
-  const maxPages = 20; // Увеличиваем лимит страниц
+  const maxPages = 2; // Только 2 страницы = 500 событий
+  const maxEvents = 500; // Лимит событий
   
-  while (nextUrl && pageCount < maxPages) {
+  while (nextUrl && pageCount < maxPages && allEvents.length < maxEvents) {
     try {
       pageCount++;
       console.log(`📄 Обрабатываем страницу ${pageCount}`);
@@ -553,8 +554,14 @@ function massExportCalls(days = 7) {
       allEvents = allEvents.concat(response._embedded.events);
       console.log(`✅ Страница ${pageCount}: ${response._embedded.events.length} событий`);
       
+      // Проверяем лимит событий
+      if (allEvents.length >= maxEvents) {
+        console.log(`🛑 Достигнут лимит ${maxEvents} событий`);
+        break;
+      }
+      
       nextUrl = response._links.next ? response._links.next.href : null;
-      Utilities.sleep(300); // Увеличиваем задержку
+      Utilities.sleep(200); // Быстрая задержка
       
     } catch (error) {
       console.log(`❌ Ошибка на странице ${pageCount}:`, error.message);
@@ -562,7 +569,7 @@ function massExportCalls(days = 7) {
     }
   }
   
-  console.log(`📊 ВСЕГО СОБРАНО ${allEvents.length} СОБЫТИЙ ЗА ${pageCount} СТРАНИЦ`);
+  console.log(`📊 ВСЕГО СОБРАНО ${allEvents.length} СОБЫТИЙ ЗА ${pageCount} СТРАНИЦ (лимит: ${maxEvents})`);
   
   // Диагностика типов событий
   const eventTypes = {};
@@ -605,10 +612,10 @@ function massExportCalls(days = 7) {
         console.log(`⏭️ Событие ${index + 1} пропущено (не звонок или уже обработан)`);
       }
       
-      // Пауза каждые 10 событий
-      if ((index + 1) % 10 === 0) {
+      // Пауза каждые 20 событий (реже)
+      if ((index + 1) % 20 === 0) {
         console.log(`⏸️ Пауза после ${index + 1} событий...`);
-        Utilities.sleep(1000);
+        Utilities.sleep(500);
       }
       
     } catch (error) {
