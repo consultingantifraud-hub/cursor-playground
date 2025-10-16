@@ -209,7 +209,7 @@ function processEvent(eventData) {
     console.log(`📞 Обработка события ID: ${eventData.id}`);
     const callNoteId = eventData.value_after?.[0]?.note?.id;
     if (!callNoteId || isCallProcessed(callNoteId)) {
-      writeLog(`Событие ${eventData.id} уже обработано или нет заметки`, 'INFO', { script_id: 'processEvent' });
+      writeLog(`Событие ${eventData.id} уже обработано или нет заметки`, 'INFO');
       return;
     }
 
@@ -225,12 +225,12 @@ function processEvent(eventData) {
         lead = getLeadByCompany(eventData.entity_id);
         break;
       default:
-        writeLog(`Неизвестный тип сущности: ${eventData.entity_type}`, 'WARNING', { script_id: 'processEvent' });
+        writeLog(`Неизвестный тип сущности: ${eventData.entity_type}`, 'WARNING');
         return;
     }
 
     if (!lead) {
-      writeLog(`Не удалось получить сделку для события ${eventData.id}`, 'WARNING', { script_id: 'processEvent' });
+      writeLog(`Не удалось получить сделку для события ${eventData.id}`, 'WARNING');
       return;
     }
 
@@ -307,10 +307,10 @@ function processEvent(eventData) {
       getAllEntityFields(lead) // 16. Все поля (с фильтрацией)
     ];
     appendToSheet(rowData);
-    writeLog(`Звонок записан в таблицу: ${lead.name} (ID: ${lead.id})`, 'SUCCESS', { script_id: 'processEvent' });
+    writeLog(`Звонок записан в таблицу: ${lead.name} (ID: ${lead.id})`, 'SUCCESS');
   } catch (error) {
     const errorMsg = `Ошибка в событии ID ${eventData.id}: ${error.message}`;
-    writeLog(errorMsg, 'ERROR', { script_id: 'processEvent' });
+    writeLog(errorMsg, 'ERROR');
     console.error(errorMsg);
   }
 }
@@ -433,50 +433,21 @@ function appendToSheet(rowData) {
   }
 }
 
-// Запись логов в лист LOGS в формате ProTalk
-function writeLog(message, type = 'INFO', additionalData = {}) {
+// Простая запись логов в лист LOGS
+function writeLog(message, type = 'INFO') {
   try {
     const spreadsheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
     let logSheet = spreadsheet.getSheetByName('LOGS');
     
     if (!logSheet) {
-      // Создаем лист LOGS если его нет
       logSheet = spreadsheet.insertSheet('LOGS');
-      const headers = [
-        'Timestamp', 'chat_id', 'social_id', 'question', 'ai_reply', 'channel', 
-        'script_id', 'model', 'tokens', 'user_tokens', 'tokens_in', 'tokens_out', 
-        'error_log', 'function_log', 'api_key'
-      ];
-      logSheet.getRange('A1:O1').setValues([headers]);
-      logSheet.getRange('A1:O1').setFontWeight('bold');
+      logSheet.getRange('A1:C1').setValues([['Время', 'Тип', 'Сообщение']]);
+      logSheet.getRange('A1:C1').setFontWeight('bold');
     }
     
     const timestamp = new Date();
-    const logData = [
-      timestamp,                                    // Timestamp
-      additionalData.chat_id || '',                // chat_id
-      additionalData.social_id || '',              // social_id
-      message,                                     // question (сообщение)
-      additionalData.ai_reply || '',               // ai_reply
-      'amogs_bot',                                 // channel
-      additionalData.script_id || 'syncEvents',    // script_id
-      'gpt-4.1-mini',                             // model
-      additionalData.tokens || 0,                  // tokens
-      additionalData.user_tokens || 0,             // user_tokens
-      additionalData.tokens_in || 0,               // tokens_in
-      additionalData.tokens_out || 0,              // tokens_out
-      type === 'ERROR' ? message : '',             // error_log
-      type === 'INFO' ? message : '',              // function_log
-      additionalData.api_key || ''                 // api_key
-    ];
-    
+    const logData = [timestamp, type, message];
     logSheet.appendRow(logData);
-    
-    // Ограничиваем количество строк в логах (оставляем последние 1000)
-    const maxRows = 1000;
-    if (logSheet.getLastRow() > maxRows) {
-      logSheet.deleteRows(2, logSheet.getLastRow() - maxRows);
-    }
     
     console.log(`📝 LOG [${type}]: ${message}`);
   } catch (error) {
@@ -487,11 +458,11 @@ function writeLog(message, type = 'INFO', additionalData = {}) {
 // Основная функция синхронизации
 function syncEventsToday() {
   try {
-    writeLog('Начало синхронизации событий', 'INFO', { script_id: 'syncEventsToday' });
+    writeLog('Начало синхронизации событий', 'INFO');
     
     const timeFrom = Math.floor((new Date().getTime() - 240 * 60 * 1000) / 1000); // 3 минут
     const timeFromStr = new Date(timeFrom * 1000).toLocaleString();
-    writeLog(`Поиск событий с ${timeFromStr}`, 'INFO', { script_id: 'syncEventsToday' });
+    writeLog(`Поиск событий с ${timeFromStr}`, 'INFO');
     
     let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
     let allEvents = [];
@@ -499,23 +470,23 @@ function syncEventsToday() {
     
     while (true) {
       pageCount++;
-      writeLog(`Обработка страницы ${pageCount}`, 'INFO', { script_id: 'syncEventsToday' });
+      writeLog(`Обработка страницы ${pageCount}`, 'INFO');
       
       const response = amoRequest(url);
       if (!response?._embedded?.events) {
-        writeLog(`Страница ${pageCount}: 0 событий - завершаем`, 'INFO', { script_id: 'syncEventsToday' });
+        writeLog(`Страница ${pageCount}: 0 событий - завершаем`, 'INFO');
         break;
       }
       
       const events = response._embedded.events;
       allEvents = allEvents.concat(events);
-      writeLog(`Страница ${pageCount}: ${events.length} событий`, 'INFO', { script_id: 'syncEventsToday' });
+      writeLog(`Страница ${pageCount}: ${events.length} событий`, 'INFO');
       
       url = response._links?.next?.href || '';
       if (!url) break;
     }
     
-    writeLog(`Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO', { script_id: 'syncEventsToday' });
+    writeLog(`Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO');
     
     // Анализируем типы событий
     const eventTypes = {};
@@ -526,40 +497,30 @@ function syncEventsToday() {
     const eventTypesStr = Object.entries(eventTypes)
       .map(([type, count]) => `${type}: ${count}`)
       .join(', ');
-    writeLog(`Типы событий: ${eventTypesStr}`, 'INFO', { script_id: 'syncEventsToday' });
+    writeLog(`Типы событий: ${eventTypesStr}`, 'INFO');
     
-    // Ищем звонки по разным типам событий
-    const calls = allEvents.filter(e => {
-      const callTypes = ['outgoing_call', 'incoming_call', 'call_started', 'call_ended'];
-      return callTypes.includes(e.type) || 
-             (e.type === 'note_added' && e.value_after?.[0]?.note?.note_type === 'call') ||
-             (e.type === 'common_note_added' && e.value_after?.[0]?.note?.note_type === 'call');
-    });
+    const calls = allEvents.filter(e =>
+      ['outgoing_call', 'incoming_call'].includes(e.type)
+    );
     
-    writeLog(`Найдено ${calls.length} событий звонков`, 'INFO', { script_id: 'syncEventsToday' });
-    
-    // Если звонков нет, показываем примеры событий
-    if (calls.length === 0 && allEvents.length > 0) {
-      const sampleEvents = allEvents.slice(0, 3).map(e => `${e.type} (${e.id})`).join(', ');
-      writeLog(`Примеры событий: ${sampleEvents}`, 'INFO', { script_id: 'syncEventsToday' });
-    }
+    writeLog(`Найдено ${calls.length} событий звонков`, 'INFO');
     
     let processedCount = 0;
-    calls.forEach((event, index) => {
+    calls.forEach(event => {
       try {
         processEvent(event);
         processedCount++;
-        writeLog(`Обработан звонок ${index + 1}/${calls.length}: ${event.id}`, 'INFO', { script_id: 'processEvent' });
+        writeLog(`Обработан звонок: ${event.id}`, 'INFO');
       } catch (error) {
-        writeLog(`Ошибка обработки звонка ${event.id}: ${error.message}`, 'ERROR', { script_id: 'processEvent' });
+        writeLog(`Ошибка обработки звонка ${event.id}: ${error.message}`, 'ERROR');
       }
     });
     
-    writeLog(`Синхронизация завершена! Обработано звонков: ${processedCount}`, 'SUCCESS', { script_id: 'syncEventsToday' });
+    writeLog(`Синхронизация завершена! Обработано звонков: ${processedCount}`, 'SUCCESS');
     
   } catch (error) {
     const errorMsg = `Критическая ошибка синхронизации: ${error.message}`;
-    writeLog(errorMsg, 'ERROR', { script_id: 'syncEventsToday' });
+    writeLog(errorMsg, 'ERROR');
     console.error(errorMsg);
   }
 }
@@ -654,107 +615,19 @@ function massExportCalls(days = 7) {
 
 function quickExport() {
   console.log('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ');
-  writeLog('БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ', 'INFO', { script_id: 'quickExport' });
+  writeLog('БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ', 'INFO');
   return massExportCallsHours(10);
 }
 
 // Тестовая функция для проверки логов
 function testLogging() {
-  writeLog('Тестовое сообщение', 'INFO', { script_id: 'testLogging' });
-  writeLog('Тестовое предупреждение', 'WARNING', { script_id: 'testLogging' });
-  writeLog('Тестовая ошибка', 'ERROR', { script_id: 'testLogging' });
-  writeLog('Тестовый успех', 'SUCCESS', { script_id: 'testLogging' });
+  writeLog('Тестовое сообщение', 'INFO');
+  writeLog('Тестовое предупреждение', 'WARNING');
+  writeLog('Тестовая ошибка', 'ERROR');
+  writeLog('Тестовый успех', 'SUCCESS');
   console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
-// Проверка звонков в листе "АМО Звонки"
-function checkCallsInSheet() {
-  try {
-    console.log('🔍 Проверка звонков в листе "АМО Звонки"');
-    writeLog('Проверка звонков в листе "АМО Звонки"', 'INFO', { script_id: 'checkCallsInSheet' });
-    
-    const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID)
-      .getSheetByName(config.SHEET_NAME);
-    
-    if (!sheet) {
-      writeLog('Лист "АМО Звонки" не найден', 'ERROR', { script_id: 'checkCallsInSheet' });
-      return;
-    }
-    
-    const lastRow = sheet.getLastRow();
-    console.log(`📊 Всего строк в листе: ${lastRow}`);
-    writeLog(`Всего строк в листе: ${lastRow}`, 'INFO', { script_id: 'checkCallsInSheet' });
-    
-    if (lastRow < 2) {
-      console.log('📊 Лист пуст');
-      writeLog('Лист пуст', 'WARNING', { script_id: 'checkCallsInSheet' });
-      return;
-    }
-    
-    // Проверяем последние 10 строк
-    const startRow = Math.max(2, lastRow - 9);
-    const data = sheet.getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn()).getValues();
-    
-    console.log(`📊 Проверяем строки ${startRow}-${lastRow}`);
-    writeLog(`Проверяем строки ${startRow}-${lastRow}`, 'INFO', { script_id: 'checkCallsInSheet' });
-    
-    // Показываем примеры данных
-    data.forEach((row, i) => {
-      const rowNum = startRow + i;
-      console.log(`Строка ${rowNum}:`, {
-        A: row[0], // Дата
-        B: row[1], // Ссылка на запись
-        C: row[2], // ID сделки
-        D: row[3], // Название сделки
-        E: row[4], // Ответственный
-        F: row[5], // Статус
-        G: row[6], // Тип звонка
-        H: row[7], // Длительность
-        I: row[8], // Номер телефона
-        J: row[9], // Имя клиента
-        K: row[10], // Компания
-        L: row[11], // Время начала
-        M: row[12], // Время окончания
-        N: row[13], // Результат
-        O: row[14], // Комментарий
-        P: row[15], // Все поля
-        Q: row[16], // ID контакта
-        R: row[17], // ID компании
-        S: row[18], // ID задачи
-        T: row[19], // ID заметки
-        U: row[20], // ID пользователя
-        V: row[21], // Транскрипция
-        W: row[22], // Оценка
-        X: row[23], // ID события
-        Y: row[24], // Время старта оценки
-        Z: row[25]  // Время окончания оценки
-      });
-    });
-    
-    // Проверяем, есть ли звонки с транскрипцией
-    const callsWithTranscript = data.filter(row => row[21] && row[21].toString().trim().length > 0);
-    console.log(`📞 Звонков с транскрипцией: ${callsWithTranscript.length}`);
-    writeLog(`Звонков с транскрипцией: ${callsWithTranscript.length}`, 'INFO', { script_id: 'checkCallsInSheet' });
-    
-    // Проверяем, есть ли звонки с оценкой
-    const callsWithEvaluation = data.filter(row => row[22] && row[22].toString().trim().length > 0);
-    console.log(`📊 Звонков с оценкой: ${callsWithEvaluation.length}`);
-    writeLog(`Звонков с оценкой: ${callsWithEvaluation.length}`, 'INFO', { script_id: 'checkCallsInSheet' });
-    
-    return {
-      totalRows: lastRow,
-      callsWithTranscript: callsWithTranscript.length,
-      callsWithEvaluation: callsWithEvaluation.length,
-      data: data
-    };
-    
-  } catch (error) {
-    const errorMsg = `Ошибка проверки листа: ${error.message}`;
-    writeLog(errorMsg, 'ERROR', { script_id: 'checkCallsInSheet' });
-    console.error(errorMsg);
-    return null;
-  }
-}
 
 // Функция для просмотра всех событий (диагностическая)
 function logEvents() {
