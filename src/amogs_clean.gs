@@ -667,24 +667,31 @@ function testLogging() {
   console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
-// Функция для просмотра всех событий
+// Функция для просмотра всех событий (диагностическая)
 function logEvents() {
   try {
     const timeFrom = Math.floor((new Date().getTime() - 150 * 60 * 1000) / 1000);
     let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
-    let allEvents = [];
+    let all = [];
     
-    while (true) {
-      const response = amoRequest(url);
-      if (!response?._embedded?.events) break;
-      allEvents = allEvents.concat(response._embedded.events);
-      url = response._links?.next?.href || '';
-      if (!url) break;
+    while (url) {
+      const resp = UrlFetchApp.fetch(url, { 
+        method: 'get', 
+        headers: { 'Authorization': 'Bearer ' + config.AMO_TOKEN }, 
+        muteHttpExceptions: true, 
+        followRedirects: true 
+      });
+      const code = resp.getResponseCode(); 
+      if (code < 200 || code >= 300) break;
+      const json = JSON.parse(resp.getContentText() || '{}');
+      all = all.concat(json?._embedded?.events || []);
+      url = json?._links?.next?.href || '';
     }
     
-    console.log('Полные события:', JSON.stringify(allEvents, null, 2));
-  } catch (error) {
-    console.error('❌ Ошибка логирования событий:', error.message);
+    console.log('[MONITOR] events: ' + all.length);
+    console.log(JSON.stringify(all.slice(0, 50), null, 2)); // не заспамить логи
+  } catch (e) { 
+    console.error('[MONITOR] ' + String(e)); 
   }
 }
 
