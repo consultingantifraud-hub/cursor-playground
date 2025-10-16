@@ -737,8 +737,129 @@ function massExportCalls(days = 7) {
 }
 
 function quickExport() {
-  console.log('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 3 ДНЯ');
-  return massExportCalls(3);
+  console.log('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ');
+  return massExportCallsHours(10);
+}
+
+function massExportCallsHours(hours = 10) {
+  getConfigFromSheet();
+  
+  const timeFrom = Math.floor((new Date().getTime() - hours * 60 * 60 * 1000) / 1000);
+  const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
+  
+  console.log(`🚀 МАССОВАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ${hours} ЧАСОВ`);
+  console.log(`Время начала: ${new Date(timeFrom * 1000).toLocaleString()}`);
+  console.log(`Время окончания: ${new Date().toLocaleString()}`);
+  
+  let allEvents = [];
+  let nextUrl = url;
+  let pageCount = 0;
+  const maxPages = 5; // Увеличиваем для большего охвата
+  const maxEvents = 1000; // Увеличиваем лимит событий
+  
+  while (nextUrl && pageCount < maxPages && allEvents.length < maxEvents) {
+    try {
+      pageCount++;
+      console.log(`📄 Обрабатываем страницу ${pageCount}`);
+      
+      const response = amoRequest(nextUrl);
+      if (!response || !response._embedded) {
+        console.log(`⚠️ Нет данных на странице ${pageCount}`);
+        break;
+      }
+      
+      allEvents = allEvents.concat(response._embedded.events);
+      console.log(`✅ Страница ${pageCount}: ${response._embedded.events.length} событий`);
+      
+      // Проверяем лимит событий
+      if (allEvents.length >= maxEvents) {
+        console.log(`🛑 Достигнут лимит ${maxEvents} событий`);
+        break;
+      }
+      
+      nextUrl = response._links.next ? response._links.next.href : null;
+      Utilities.sleep(200); // Быстрая задержка
+      
+    } catch (error) {
+      console.log(`❌ Ошибка на странице ${pageCount}:`, error.message);
+      break;
+    }
+  }
+  
+  console.log(`📊 ВСЕГО СОБРАНО ${allEvents.length} СОБЫТИЙ ЗА ${pageCount} СТРАНИЦ (лимит: ${maxEvents})`);
+  
+  // Диагностика типов событий
+  const eventTypes = {};
+  allEvents.forEach(e => {
+    eventTypes[e.type] = (eventTypes[e.type] || 0) + 1;
+  });
+  console.log(`📈 ТИПЫ СОБЫТИЙ:`, eventTypes);
+  
+  // Ищем ВСЕ события с заметками + события звонков
+  const noteEvents = allEvents.filter(e => 
+    e.type === 'note_added' || 
+    e.type === 'common_note_added' ||
+    e.type === 'targeting_in_note_added' ||
+    e.type === 'targeting_out_note_added' ||
+    e.type === 'outgoing_call' ||
+    e.type === 'incoming_call' ||
+    e.type === 'call_started' ||
+    e.type === 'call_ended'
+  );
+  
+  console.log(`📝 НАЙДЕНО ${noteEvents.length} СОБЫТИЙ С ЗАМЕТКАМИ`);
+  
+  // Показываем примеры событий с заметками
+  if (noteEvents.length > 0) {
+    console.log(`📄 ПРИМЕРЫ СОБЫТИЙ С ЗАМЕТКАМИ (первые 10):`);
+    noteEvents.slice(0, 10).forEach((event, i) => {
+      console.log(`  ${i+1}. ${event.type} - ${event.entity_type} - ${event.id} - ${new Date(event.created_at * 1000).toLocaleString()}`);
+    });
+  }
+  
+  let processed = 0;
+  let errors = 0;
+  
+  console.log(`🔄 НАЧИНАЕМ ОБРАБОТКУ ${noteEvents.length} СОБЫТИЙ...`);
+  
+  noteEvents.forEach((event, index) => {
+    try {
+      console.log(`📞 Обрабатываем событие ${index + 1}/${noteEvents.length}: ${event.id}`);
+      
+      if (processNoteEvent(event)) {
+        processed++;
+        console.log(`✅ Звонок ${index + 1} обработан успешно`);
+      } else {
+        console.log(`⏭️ Событие ${index + 1} пропущено (не звонок или уже обработан)`);
+      }
+      
+      // Пауза каждые 20 событий (реже)
+      if ((index + 1) % 20 === 0) {
+        console.log(`⏸️ Пауза после ${index + 1} событий...`);
+        Utilities.sleep(500);
+      }
+      
+    } catch (error) {
+      errors++;
+      console.log(`❌ Ошибка обработки события ${event.id}:`, error.message);
+    }
+  });
+  
+  console.log(`🎉 МАССОВАЯ ВЫГРУЗКА ЗАВЕРШЕНА!`);
+  console.log(`📊 СТАТИСТИКА:`);
+  console.log(`   - Всего событий: ${allEvents.length}`);
+  console.log(`   - Событий с заметками: ${noteEvents.length}`);
+  console.log(`   - Обработано звонков: ${processed}`);
+  console.log(`   - Ошибок: ${errors}`);
+  console.log(`   - Страниц обработано: ${pageCount}`);
+  
+  return {
+    totalEvents: allEvents.length,
+    noteEvents: noteEvents.length,
+    processed: processed,
+    errors: errors,
+    pages: pageCount
+  };
 }
 
 function fullExport() {
