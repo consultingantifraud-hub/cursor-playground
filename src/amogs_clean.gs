@@ -455,71 +455,49 @@ function writeLog(message, type = 'INFO') {
   }
 }
 
-// Основная функция синхронизации
+// Основная функция синхронизации (ОТКЛЮЧЕНА - звонки обрабатываются ProTalk)
 function syncEventsToday() {
   try {
-    writeLog('Начало синхронизации событий', 'INFO');
+    writeLog('syncEventsToday ОТКЛЮЧЕНА - звонки обрабатываются ProTalk', 'INFO');
+    writeLog('Используйте ToProTalkBot() и chatToProTalkBot() для обработки звонков', 'INFO');
     
-    const timeFrom = Math.floor((new Date().getTime() - 240 * 60 * 1000) / 1000); // 3 минут
-    const timeFromStr = new Date(timeFrom * 1000).toLocaleString();
-    writeLog(`Поиск событий с ${timeFromStr}`, 'INFO');
+    // Проверяем, есть ли звонки в листе
+    const sheet = SpreadsheetApp.openById(config.SPREADSHEET_ID)
+      .getSheetByName(config.SHEET_NAME);
     
-    let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
-    let allEvents = [];
-    let pageCount = 0;
-    
-    while (true) {
-      pageCount++;
-      writeLog(`Обработка страницы ${pageCount}`, 'INFO');
-      
-      const response = amoRequest(url);
-      if (!response?._embedded?.events) {
-        writeLog(`Страница ${pageCount}: 0 событий - завершаем`, 'INFO');
-        break;
-      }
-      
-      const events = response._embedded.events;
-      allEvents = allEvents.concat(events);
-      writeLog(`Страница ${pageCount}: ${events.length} событий`, 'INFO');
-      
-      url = response._links?.next?.href || '';
-      if (!url) break;
+    if (!sheet) {
+      writeLog('Лист не найден', 'ERROR');
+      return;
     }
     
-    writeLog(`Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO');
+    const lastRow = sheet.getLastRow();
+    writeLog(`Всего строк в листе: ${lastRow}`, 'INFO');
     
-    // Анализируем типы событий
-    const eventTypes = {};
-    allEvents.forEach(e => {
-      eventTypes[e.type] = (eventTypes[e.type] || 0) + 1;
+    if (lastRow < 2) {
+      writeLog('Лист пуст', 'WARNING');
+      return;
+    }
+    
+    // Проверяем последние 5 строк
+    const data = sheet.getRange(Math.max(2, lastRow - 4), 1, Math.min(5, lastRow - 1), sheet.getLastColumn()).getValues();
+    
+    let callsWithTranscript = 0;
+    let callsWithEvaluation = 0;
+    
+    data.forEach((row, i) => {
+      const rowNum = lastRow - 4 + i;
+      const transcript = row[21]; // V
+      const evaluation = row[22]; // W
+      
+      if (transcript && transcript.toString().trim().length > 0) callsWithTranscript++;
+      if (evaluation && evaluation.toString().trim().length > 0) callsWithEvaluation++;
     });
     
-    const eventTypesStr = Object.entries(eventTypes)
-      .map(([type, count]) => `${type}: ${count}`)
-      .join(', ');
-    writeLog(`Типы событий: ${eventTypesStr}`, 'INFO');
-    
-    const calls = allEvents.filter(e =>
-      ['outgoing_call', 'incoming_call'].includes(e.type)
-    );
-    
-    writeLog(`Найдено ${calls.length} событий звонков`, 'INFO');
-    
-    let processedCount = 0;
-    calls.forEach(event => {
-      try {
-        processEvent(event);
-        processedCount++;
-        writeLog(`Обработан звонок: ${event.id}`, 'INFO');
-      } catch (error) {
-        writeLog(`Ошибка обработки звонка ${event.id}: ${error.message}`, 'ERROR');
-      }
-    });
-    
-    writeLog(`Синхронизация завершена! Обработано звонков: ${processedCount}`, 'SUCCESS');
+    writeLog(`Звонков с транскрипцией: ${callsWithTranscript}`, 'INFO');
+    writeLog(`Звонков с оценкой: ${callsWithEvaluation}`, 'INFO');
     
   } catch (error) {
-    const errorMsg = `Критическая ошибка синхронизации: ${error.message}`;
+    const errorMsg = `Ошибка проверки листа: ${error.message}`;
     writeLog(errorMsg, 'ERROR');
     console.error(errorMsg);
   }
@@ -626,6 +604,198 @@ function testLogging() {
   writeLog('Тестовая ошибка', 'ERROR');
   writeLog('Тестовый успех', 'SUCCESS');
   console.log('✅ Тестовые логи записаны в лист LOGS');
+}
+
+// Функция для обработки звонков через ProTalk (транскрипция)
+function chatToProTalkBot() {
+  try {
+    writeLog('Запуск chatToProTalkBot для транскрипции', 'INFO');
+    
+    const dbSheet = SpreadsheetApp.getActive().getSheetByName("БД");
+    if (!dbSheet) throw new Error("Лист 'БД' не найден");
+   
+    const botToken = dbSheet.getRange("B5").getValue();
+    const botId = dbSheet.getRange("B6").getValue();
+    const targetSheetName = dbSheet.getRange("B4").getValue();
+   
+    writeLog(`Настройки: лист ${targetSheetName}, botId=${botId}`, 'INFO');
+   
+    const targetSheet = SpreadsheetApp.getActive().getSheetByName(targetSheetName);
+    if (!targetSheet) throw new Error(`Лист '${targetSheetName}' не найден`);
+   
+    const dataRange = targetSheet.getDataRange();
+    const values = dataRange.getValues();
+   
+    // Поиск строки для обработки (колонка U = 20, Y = 24)
+    let rowToProcess = null;
+    for (let i = 1; i < values.length; i++) {
+      const question = values[i][20]; // U
+      const startDate = values[i][24]; // Y
+     
+      if (question && !startDate) {
+        rowToProcess = i + 1;
+        break;
+      }
+    }
+   
+    if (!rowToProcess) {
+      writeLog('Нет строк для обработки транскрипции', 'INFO');
+      return;
+    }
+   
+    writeLog(`Обрабатывается строка ${rowToProcess} для транскрипции`, 'INFO');
+    
+    // Запись даты начала в колонку Y (25-й столбец)
+    const startDateCell = targetSheet.getRange(rowToProcess, 25);
+    startDateCell.setValue(new Date());
+   
+    const questionCell = targetSheet.getRange(rowToProcess, 21);
+    let question = questionCell.getValue();
+    if (!question) throw new Error("Пустой вопрос в строке " + rowToProcess);
+   
+    question = '🏁##' + question;
+    const requests = question.split("##").map(q => q.trim()).filter(Boolean);
+   
+    const chatId = "chat_" + Date.now();
+    const apiUrl = `https://eu1.api.pro-talk.ru/api/v1.0/ask/${botToken}`;
+    let lastResponse = null;
+   
+    const TIMEOUT_MS = 300000;
+   
+    for (const q of requests) {
+      try {
+        writeLog(`Отправка запроса транскрипции: ${q.substring(0, 50)}...`, 'INFO');
+        const response = UrlFetchApp.fetch(apiUrl, {
+          method: "post",
+          contentType: "application/json",
+          muteHttpExceptions: true,
+          timeout: TIMEOUT_MS,
+          payload: JSON.stringify({
+            bot_id: botId,
+            chat_id: chatId,
+            message: q
+          })
+        });
+       
+        if (response.getResponseCode() !== 200) {
+          throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+        }
+       
+        const result = JSON.parse(response.getContentText());
+        lastResponse = result.done;
+        writeLog(`Получен ответ транскрипции: ${lastResponse ? 'OK' : 'ERROR'}`, 'INFO');
+        Utilities.sleep(1000);
+       
+      } catch (e) {
+        writeLog(`Ошибка в запросе транскрипции: ${e.message}`, 'ERROR');
+        throw e;
+      }
+    }
+   
+    const cleanResponse = lastResponse ? lastResponse.replace(/\*/g, '') : '';
+    targetSheet.getRange(rowToProcess, 22).setValue(cleanResponse);
+    writeLog(`Транскрипция записана в строку ${rowToProcess}`, 'SUCCESS');
+   
+  } catch (e) {
+    writeLog(`Ошибка в chatToProTalkBot: ${e.message}`, 'ERROR');
+    console.error("Произошла ошибка: " + e.message);
+  }
+}
+
+// Функция для обработки звонков через ProTalk (оценка)
+function ToProTalkBot() {
+  try {
+    writeLog('Запуск ToProTalkBot для оценки', 'INFO');
+    
+    const dbSheet = SpreadsheetApp.getActive().getSheetByName("БД");
+    if (!dbSheet) throw new Error("Лист 'БД' не найден");
+   
+    const botToken = dbSheet.getRange("B5").getValue();
+    const botId = dbSheet.getRange("B6").getValue();
+    const targetSheetName = dbSheet.getRange("B4").getValue();
+   
+    writeLog(`Настройки: лист ${targetSheetName}, botId=${botId}`, 'INFO');
+   
+    const targetSheet = SpreadsheetApp.getActive().getSheetByName(targetSheetName);
+    if (!targetSheet) throw new Error(`Лист '${targetSheetName}' не найден`);
+   
+    const dataRange = targetSheet.getDataRange();
+    const values = dataRange.getValues();
+   
+    // Поиск строки для обработки (колонка U = 20, Y = 24)
+    let rowToProcess = null;
+    for (let i = 1; i < values.length; i++) {
+      const question = values[i][20]; // U
+      const startDate = values[i][24]; // Y
+     
+      if (question && !startDate) {
+        rowToProcess = i + 1;
+        break;
+      }
+    }
+   
+    if (!rowToProcess) {
+      writeLog('Нет строк для обработки оценки', 'INFO');
+      return;
+    }
+   
+    writeLog(`Обрабатывается строка ${rowToProcess} для оценки`, 'INFO');
+    
+    // Запись даты начала в колонку Y (25-й столбец)
+    const startDateCell = targetSheet.getRange(rowToProcess, 25);
+    startDateCell.setValue(new Date());
+   
+    const questionCell = targetSheet.getRange(rowToProcess, 21);
+    let question = questionCell.getValue();
+    if (!question) throw new Error("Пустой вопрос в строке " + rowToProcess);
+   
+    question = '🏁##' + question;
+    const requests = question.split("##").map(q => q.trim()).filter(Boolean);
+   
+    const chatId = "chat_" + Date.now();
+    const apiUrl = `https://us1.api.pro-talk.ru/api/v1.0/ask/${botToken}`;
+    let lastResponse = null;
+   
+    const TIMEOUT_MS = 300000;
+   
+    for (const q of requests) {
+      try {
+        writeLog(`Отправка запроса оценки: ${q.substring(0, 50)}...`, 'INFO');
+        const response = UrlFetchApp.fetch(apiUrl, {
+          method: "post",
+          contentType: "application/json",
+          muteHttpExceptions: true,
+          timeout: TIMEOUT_MS,
+          payload: JSON.stringify({
+            bot_id: botId,
+            chat_id: chatId,
+            message: q
+          })
+        });
+       
+        if (response.getResponseCode() !== 200) {
+          throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+        }
+       
+        const result = JSON.parse(response.getContentText());
+        lastResponse = result.done;
+        writeLog(`Получен ответ оценки: ${lastResponse ? 'OK' : 'ERROR'}`, 'INFO');
+        Utilities.sleep(1000);
+       
+      } catch (e) {
+        writeLog(`Ошибка в запросе оценки: ${e.message}`, 'ERROR');
+        throw e;
+      }
+    }
+   
+    const cleanResponse = lastResponse ? lastResponse.replace(/\*/g, '') : '';
+    targetSheet.getRange(rowToProcess, 23).setValue(cleanResponse);
+    writeLog(`Оценка записана в строку ${rowToProcess}`, 'SUCCESS');
+   
+  } catch (e) {
+    writeLog(`Ошибка в ToProTalkBot: ${e.message}`, 'ERROR');
+    console.error("Произошла ошибка: " + e.message);
+  }
 }
 
 
