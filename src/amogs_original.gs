@@ -255,23 +255,130 @@ function syncEventsToday() {
   
   console.log(`📊 Всего получено ${allEvents.length} событий за ${pageCount} страниц`);
   
-  const calls = allEvents.filter(e => 
-    ['outgoing_call', 'incoming_call'].includes(e.type)
-  );
-  
-  console.log(`📞 Найдено ${calls.length} звонков`);
+  // Ищем события с заметками (note_added)
+  const noteEvents = allEvents.filter(e => e.type === 'note_added');
+  console.log(`📝 Найдено ${noteEvents.length} событий с заметками`);
   
   let processed = 0;
-  calls.forEach(event => {
+  noteEvents.forEach(event => {
     try {
-      processEvent(event);
-      processed++;
+      if (processNoteEvent(event)) {
+        processed++;
+      }
     } catch (error) {
       console.log(`❌ Ошибка обработки события ${event.id}:`, error.message);
     }
   });
   
   console.log(`✅ Обработано ${processed} звонков`);
+}
+
+// ---- Новая функция для обработки событий с заметками ----------------
+function processNoteEvent(eventData) {
+  if (eventData.type !== 'note_added') {
+    return false;
+  }
+  
+  const note = eventData.value_after?.[0]?.note;
+  if (!note) {
+    return false;
+  }
+  
+  // Проверяем, является ли это звонком
+  const isCall = isCallNote(note);
+  if (!isCall) {
+    return false;
+  }
+  
+  const callId = note.id;
+  if (isCallProcessed(callId)) {
+    console.log(`⏭️ Звонок ${callId} уже обработан`);
+    return false;
+  }
+  
+  const leadId = eventData.entity_id;
+  const lead = getAmoLead(leadId);
+  if (!lead) {
+    console.log(`❌ Не удалось получить сделку ${leadId}`);
+    return false;
+  }
+  
+  // Безопасное получение контакта
+  let contact = null;
+  if (lead._embedded && lead._embedded.contacts && lead._embedded.contacts.length > 0) {
+    try {
+      contact = getAmoContact(lead._embedded.contacts[0].id);
+    } catch (error) {
+      console.log(`⚠️ Ошибка получения контакта: ${error.message}`);
+    }
+  }
+  
+  // Безопасное получение компании
+  let company = null;
+  if (lead._embedded && lead._embedded.companies && lead._embedded.companies.length > 0) {
+    try {
+      company = getAmoCompany(lead._embedded.companies[0].id);
+    } catch (error) {
+      console.log(`⚠️ Ошибка получения компании: ${error.message}`);
+    }
+  }
+  
+  const callData = {
+    callId: callId,
+    leadId: leadId,
+    leadName: lead.name || 'Без названия',
+    contactName: contact ? contact.name : 'Без контакта',
+    companyName: company ? company.name : 'Без компании',
+    callType: getCallType(note),
+    callDate: formatTimestamp(eventData.created_at),
+    duration: note.params ? (note.params.duration || 0) : 0,
+    audioUrl: note.params ? (note.params.link || '') : '',
+    callStatus: note.params ? (note.params.call_status || '') : '',
+    responsible: lead.responsible_user_id || 'Неизвестно'
+  };
+  
+  console.log(`✅ Обрабатываем звонок ${callId} для сделки ${leadId}`);
+  appendToSheet(callData);
+  return true;
+}
+
+// ---- Функция определения типа звонка --------------------------------
+function isCallNote(note) {
+  if (!note) return false;
+  
+  const noteType = String(note.note_type || '').toLowerCase();
+  const params = note.params || {};
+  
+  // Стандартные типы звонков
+  if (/^(call_in|call_out)$/i.test(noteType)) return true;
+  
+  // Гибридные звонки: common заметки с признаками звонка
+  if (noteType === 'common') {
+    const hasLink = params.link && /^https?:\/\//i.test(String(params.link));
+    const hasDuration = params.duration && Number(params.duration) > 0;
+    const hasCallStatus = params.call_status !== undefined;
+    return hasLink || hasDuration || hasCallStatus;
+  }
+  
+  return false;
+}
+
+// ---- Функция определения типа звонка --------------------------------
+function getCallType(note) {
+  const noteType = String(note.note_type || '').toLowerCase();
+  const params = note.params || {};
+  
+  if (noteType === 'call_out') return 'Исходящий';
+  if (noteType === 'call_in') return 'Входящий';
+  
+  // Для common заметок определяем по содержимому
+  if (noteType === 'common') {
+    const text = String(note.params?.text || '').toLowerCase();
+    if (text.includes('исходящий') || text.includes('outgoing')) return 'Исходящий';
+    if (text.includes('входящий') || text.includes('incoming')) return 'Входящий';
+  }
+  
+  return 'Неизвестно';
 }
 
 function logEvents() {
