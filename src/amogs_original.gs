@@ -132,35 +132,60 @@ function processEvent(eventData) {
   
   const callId = eventData.id;
   if (isCallProcessed(callId)) {
+    console.log(`⏭️ Звонок ${callId} уже обработан`);
     return;
   }
   
   const leadId = eventData.entity_id;
   const lead = getAmoLead(leadId);
-  if (!lead) return;
+  if (!lead) {
+    console.log(`❌ Не удалось получить сделку ${leadId}`);
+    return;
+  }
   
-  const contact = lead._embedded.contacts[0] ? getAmoContact(lead._embedded.contacts[0].id) : null;
-  const company = lead._embedded.companies[0] ? getAmoCompany(lead._embedded.companies[0].id) : null;
+  // Безопасное получение контакта
+  let contact = null;
+  if (lead._embedded && lead._embedded.contacts && lead._embedded.contacts.length > 0) {
+    try {
+      contact = getAmoContact(lead._embedded.contacts[0].id);
+    } catch (error) {
+      console.log(`⚠️ Ошибка получения контакта: ${error.message}`);
+    }
+  }
+  
+  // Безопасное получение компании
+  let company = null;
+  if (lead._embedded && lead._embedded.companies && lead._embedded.companies.length > 0) {
+    try {
+      company = getAmoCompany(lead._embedded.companies[0].id);
+    } catch (error) {
+      console.log(`⚠️ Ошибка получения компании: ${error.message}`);
+    }
+  }
   
   const notes = getAmoNotes('leads', leadId);
   const callNote = notes.find(n => n.id === callId);
   
-  if (!callNote) return;
+  if (!callNote) {
+    console.log(`❌ Не найдена заметка для звонка ${callId}`);
+    return;
+  }
   
   const callData = {
     callId: callId,
     leadId: leadId,
-    leadName: lead.name,
-    contactName: contact ? contact.name : '',
-    companyName: company ? company.name : '',
+    leadName: lead.name || 'Без названия',
+    contactName: contact ? contact.name : 'Без контакта',
+    companyName: company ? company.name : 'Без компании',
     callType: eventData.type === 'outgoing_call' ? 'Исходящий' : 'Входящий',
     callDate: formatTimestamp(eventData.created_at),
-    duration: callNote.params.duration || 0,
-    audioUrl: callNote.params.link || '',
-    callStatus: callNote.params.call_status || '',
-    responsible: lead.responsible_user_id
+    duration: callNote.params ? (callNote.params.duration || 0) : 0,
+    audioUrl: callNote.params ? (callNote.params.link || '') : '',
+    callStatus: callNote.params ? (callNote.params.call_status || '') : '',
+    responsible: lead.responsible_user_id || 'Неизвестно'
   };
   
+  console.log(`✅ Обрабатываем звонок ${callId} для сделки ${leadId}`);
   appendToSheet(callData);
 }
 
@@ -349,4 +374,73 @@ function syncEventsLastHours(hours = 2) {
   });
   
   console.log(`✅ Обработано звонков: ${processed}`);
+}
+
+// ---- Функция для диагностики структуры данных ------------------------
+function debugEventStructure() {
+  getConfigFromSheet();
+  
+  const timeFrom = Math.floor((new Date().getTime() - 2 * 60 * 60 * 1000) / 1000);
+  const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=10`;
+  
+  console.log('🔍 Диагностика структуры событий');
+  
+  const response = amoRequest(url);
+  if (!response || !response._embedded) {
+    console.log('❌ Нет событий');
+    return;
+  }
+  
+  const events = response._embedded.events;
+  const callEvents = events.filter(e => 
+    ['outgoing_call', 'incoming_call'].includes(e.type)
+  );
+  
+  console.log(`📊 Всего событий: ${events.length}, звонков: ${callEvents.length}`);
+  
+  if (callEvents.length > 0) {
+    const event = callEvents[0];
+    console.log('📞 Структура события звонка:');
+    console.log(`ID: ${event.id}`);
+    console.log(`Type: ${event.type}`);
+    console.log(`Entity ID: ${event.entity_id}`);
+    console.log(`Created: ${new Date(event.created_at * 1000).toLocaleString()}`);
+    
+    // Проверяем сделку
+    const lead = getAmoLead(event.entity_id);
+    if (lead) {
+      console.log('📋 Структура сделки:');
+      console.log(`Name: ${lead.name}`);
+      console.log(`Has embedded: ${!!lead._embedded}`);
+      if (lead._embedded) {
+        console.log(`Has contacts: ${!!lead._embedded.contacts}`);
+        console.log(`Has companies: ${!!lead._embedded.companies}`);
+        if (lead._embedded.contacts) {
+          console.log(`Contacts count: ${lead._embedded.contacts.length}`);
+        }
+        if (lead._embedded.companies) {
+          console.log(`Companies count: ${lead._embedded.companies.length}`);
+        }
+      }
+      
+      // Проверяем заметки
+      const notes = getAmoNotes('leads', event.entity_id);
+      const callNote = notes.find(n => n.id === event.id);
+      if (callNote) {
+        console.log('📝 Структура заметки звонка:');
+        console.log(`Note ID: ${callNote.id}`);
+        console.log(`Note type: ${callNote.note_type}`);
+        console.log(`Has params: ${!!callNote.params}`);
+        if (callNote.params) {
+          console.log(`Duration: ${callNote.params.duration}`);
+          console.log(`Link: ${callNote.params.link}`);
+          console.log(`Call status: ${callNote.params.call_status}`);
+        }
+      } else {
+        console.log('❌ Заметка звонка не найдена');
+      }
+    } else {
+      console.log('❌ Сделка не найдена');
+    }
+  }
 }
