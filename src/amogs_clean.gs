@@ -517,11 +517,32 @@ function syncEventsToday() {
     
     writeLog(`Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO', { script_id: 'syncEventsToday' });
     
-    const calls = allEvents.filter(e =>
-      ['outgoing_call', 'incoming_call'].includes(e.type)
-    );
+    // Анализируем типы событий
+    const eventTypes = {};
+    allEvents.forEach(e => {
+      eventTypes[e.type] = (eventTypes[e.type] || 0) + 1;
+    });
+    
+    const eventTypesStr = Object.entries(eventTypes)
+      .map(([type, count]) => `${type}: ${count}`)
+      .join(', ');
+    writeLog(`Типы событий: ${eventTypesStr}`, 'INFO', { script_id: 'syncEventsToday' });
+    
+    // Ищем звонки по разным типам событий
+    const calls = allEvents.filter(e => {
+      const callTypes = ['outgoing_call', 'incoming_call', 'call_started', 'call_ended'];
+      return callTypes.includes(e.type) || 
+             (e.type === 'note_added' && e.value_after?.[0]?.note?.note_type === 'call') ||
+             (e.type === 'common_note_added' && e.value_after?.[0]?.note?.note_type === 'call');
+    });
     
     writeLog(`Найдено ${calls.length} событий звонков`, 'INFO', { script_id: 'syncEventsToday' });
+    
+    // Если звонков нет, показываем примеры событий
+    if (calls.length === 0 && allEvents.length > 0) {
+      const sampleEvents = allEvents.slice(0, 3).map(e => `${e.type} (${e.id})`).join(', ');
+      writeLog(`Примеры событий: ${sampleEvents}`, 'INFO', { script_id: 'syncEventsToday' });
+    }
     
     let processedCount = 0;
     calls.forEach((event, index) => {
