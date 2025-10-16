@@ -197,11 +197,15 @@ function processDirectCallEvent(eventData) {
   }
   
   const leadId = eventData.entity_id;
+  console.log(`🔍 Получаем сделку ${leadId} для звонка ${callId}`);
+  
   const lead = getAmoLead(leadId);
   if (!lead) {
-    console.log(`❌ Не удалось получить сделку ${leadId}`);
+    console.log(`❌ Не удалось получить сделку ${leadId} - пропускаем звонок`);
     return false;
   }
+  
+  console.log(`✅ Сделка ${leadId} получена: ${lead.name || 'Без названия'}`);
   
   // Безопасное получение контакта
   let contact = null;
@@ -258,6 +262,12 @@ function processNoteEvent(eventData) {
   // Обрабатываем прямые события звонков
   if (['outgoing_call', 'incoming_call', 'call_started', 'call_ended'].includes(eventData.type)) {
     console.log(`📞 Обрабатываем прямое событие звонка: ${eventData.type}`);
+    console.log(`📊 Данные события:`, {
+      id: eventData.id,
+      entity_id: eventData.entity_id,
+      entity_type: eventData.entity_type,
+      created_at: new Date(eventData.created_at * 1000).toLocaleString()
+    });
     return processDirectCallEvent(eventData);
   }
   
