@@ -262,8 +262,13 @@ function syncEventsToday() {
   });
   console.log(`📈 Типы событий:`, eventTypes);
   
-  // Ищем события с заметками (note_added)
-  const noteEvents = allEvents.filter(e => e.type === 'note_added');
+  // Ищем события с заметками (common_note_added, note_added)
+  const noteEvents = allEvents.filter(e => 
+    e.type === 'note_added' || 
+    e.type === 'common_note_added' ||
+    e.type === 'targeting_in_note_added' ||
+    e.type === 'targeting_out_note_added'
+  );
   console.log(`📝 Найдено ${noteEvents.length} событий с заметками`);
   
   // Показываем примеры событий
@@ -290,7 +295,7 @@ function syncEventsToday() {
 
 // ---- Новая функция для обработки событий с заметками ----------------
 function processNoteEvent(eventData) {
-  if (eventData.type !== 'note_added') {
+  if (!['note_added', 'common_note_added', 'targeting_in_note_added', 'targeting_out_note_added'].includes(eventData.type)) {
     return false;
   }
   
@@ -571,11 +576,12 @@ function debugEventStructure() {
 function debugEventsDetailed() {
   getConfigFromSheet();
   
-  const timeFrom = Math.floor((new Date().getTime() - 2 * 60 * 60 * 1000) / 1000);
+  // Учитываем часовой пояс - смотрим на 6 часов назад
+  const timeFrom = Math.floor((new Date().getTime() - 6 * 60 * 60 * 1000) / 1000);
   const url = `https://${config.AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?filter[created_at][from]=${timeFrom}&limit=50`;
   
   console.log('🔍 Детальная диагностика событий');
-  console.log(`Время: ${new Date(timeFrom * 1000).toLocaleString()}`);
+  console.log(`Время: ${new Date(timeFrom * 1000).toLocaleString()} (6 часов назад)`);
   
   const response = amoRequest(url);
   if (!response || !response._embedded) {
@@ -603,8 +609,13 @@ function debugEventsDetailed() {
     console.log(`  ${i+1}. ${event.type} - ${event.entity_type} - ${event.id} - ${new Date(event.created_at * 1000).toLocaleString()}`);
   });
   
-  // Ищем события с заметками
-  const noteEvents = events.filter(e => e.type === 'note_added');
+  // Ищем события с заметками (все типы)
+  const noteEvents = events.filter(e => 
+    e.type === 'note_added' || 
+    e.type === 'common_note_added' ||
+    e.type === 'targeting_in_note_added' ||
+    e.type === 'targeting_out_note_added'
+  );
   console.log(`📝 События с заметками: ${noteEvents.length}`);
   
   if (noteEvents.length > 0) {
