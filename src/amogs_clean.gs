@@ -208,7 +208,10 @@ function processEvent(eventData) {
   try {
     console.log(`📞 Обработка события ID: ${eventData.id}`);
     const callNoteId = eventData.value_after?.[0]?.note?.id;
-    if (!callNoteId || isCallProcessed(callNoteId)) return;
+    if (!callNoteId || isCallProcessed(callNoteId)) {
+      writeLog(`⏭️ Событие ${eventData.id} уже обработано или нет заметки`, 'INFO');
+      return;
+    }
 
     let lead;
     switch(eventData.entity_type.toLowerCase()) {
@@ -222,11 +225,14 @@ function processEvent(eventData) {
         lead = getLeadByCompany(eventData.entity_id);
         break;
       default:
-        console.log(`Неизвестный тип сущности: ${eventData.entity_type}`);
+        writeLog(`❌ Неизвестный тип сущности: ${eventData.entity_type}`, 'WARNING');
         return;
     }
 
-    if (!lead) return;
+    if (!lead) {
+      writeLog(`❌ Не удалось получить сделку для события ${eventData.id}`, 'WARNING');
+      return;
+    }
 
     // Получение задач и примечаний
     const tasksText = getAmoTasks(lead.id);
@@ -301,8 +307,11 @@ function processEvent(eventData) {
       getAllEntityFields(lead) // 16. Все поля (с фильтрацией)
     ];
     appendToSheet(rowData);
+    writeLog(`✅ Звонок записан в таблицу: ${lead.name} (ID: ${lead.id})`, 'SUCCESS');
   } catch (error) {
-    console.error(`❌ Ошибка в событии ID ${eventData.id}:`, error.message);
+    const errorMsg = `❌ Ошибка в событии ID ${eventData.id}: ${error.message}`;
+    writeLog(errorMsg, 'ERROR');
+    console.error(errorMsg);
   }
 }
 
@@ -424,25 +433,91 @@ function appendToSheet(rowData) {
   }
 }
 
+// Запись логов в лист LOGS
+function writeLog(message, type = 'INFO') {
+  try {
+    const spreadsheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
+    let logSheet = spreadsheet.getSheetByName('LOGS');
+    
+    if (!logSheet) {
+      // Создаем лист LOGS если его нет
+      logSheet = spreadsheet.insertSheet('LOGS');
+      logSheet.getRange('A1:C1').setValues([['Время', 'Тип', 'Сообщение']]);
+      logSheet.getRange('A1:C1').setFontWeight('bold');
+    }
+    
+    const timestamp = new Date();
+    const logData = [timestamp, type, message];
+    logSheet.appendRow(logData);
+    
+    // Ограничиваем количество строк в логах (оставляем последние 1000)
+    const maxRows = 1000;
+    if (logSheet.getLastRow() > maxRows) {
+      logSheet.deleteRows(2, logSheet.getLastRow() - maxRows);
+    }
+    
+    console.log(`📝 LOG [${type}]: ${message}`);
+  } catch (error) {
+    console.error('❌ Ошибка записи лога:', error.message);
+  }
+}
+
 // Основная функция синхронизации
 function syncEventsToday() {
   try {
+    writeLog('🚀 Начало синхронизации событий', 'INFO');
+    
     const timeFrom = Math.floor((new Date().getTime() - 240 * 60 * 1000) / 1000); // 3 минут
+    const timeFromStr = new Date(timeFrom * 1000).toLocaleString();
+    writeLog(`⏰ Поиск событий с ${timeFromStr}`, 'INFO');
+    
     let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
     let allEvents = [];
+    let pageCount = 0;
+    
     while (true) {
+      pageCount++;
+      writeLog(`📄 Обработка страницы ${pageCount}`, 'INFO');
+      
       const response = amoRequest(url);
-      if (!response?._embedded?.events) break;
-      allEvents = allEvents.concat(response._embedded.events);
+      if (!response?._embedded?.events) {
+        writeLog(`✅ Страница ${pageCount}: 0 событий - завершаем`, 'INFO');
+        break;
+      }
+      
+      const events = response._embedded.events;
+      allEvents = allEvents.concat(events);
+      writeLog(`✅ Страница ${pageCount}: ${events.length} событий`, 'INFO');
+      
       url = response._links?.next?.href || '';
       if (!url) break;
     }
+    
+    writeLog(`📊 Всего собрано ${allEvents.length} событий за ${pageCount} страниц`, 'INFO');
+    
     const calls = allEvents.filter(e =>
       ['outgoing_call', 'incoming_call'].includes(e.type)
     );
-    calls.forEach(event => processEvent(event));
+    
+    writeLog(`📞 Найдено ${calls.length} событий звонков`, 'INFO');
+    
+    let processedCount = 0;
+    calls.forEach((event, index) => {
+      try {
+        processEvent(event);
+        processedCount++;
+        writeLog(`✅ Обработан звонок ${index + 1}/${calls.length}: ${event.id}`, 'INFO');
+      } catch (error) {
+        writeLog(`❌ Ошибка обработки звонка ${event.id}: ${error.message}`, 'ERROR');
+      }
+    });
+    
+    writeLog(`🎉 Синхронизация завершена! Обработано звонков: ${processedCount}`, 'SUCCESS');
+    
   } catch (error) {
-    console.error('❌ Ошибка синхронизации:', error.message);
+    const errorMsg = `❌ Критическая ошибка синхронизации: ${error.message}`;
+    writeLog(errorMsg, 'ERROR');
+    console.error(errorMsg);
   }
 }
 
@@ -536,7 +611,17 @@ function massExportCalls(days = 7) {
 
 function quickExport() {
   console.log('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ');
+  writeLog('🚀 БЫСТРАЯ ВЫГРУЗКА ЗВОНКОВ ЗА ПОСЛЕДНИЕ 10 ЧАСОВ', 'INFO');
   return massExportCallsHours(10);
+}
+
+// Тестовая функция для проверки логов
+function testLogging() {
+  writeLog('🧪 Тестовое сообщение', 'INFO');
+  writeLog('⚠️ Тестовое предупреждение', 'WARNING');
+  writeLog('❌ Тестовая ошибка', 'ERROR');
+  writeLog('✅ Тестовый успех', 'SUCCESS');
+  console.log('✅ Тестовые логи записаны в лист LOGS');
 }
 
 function fullExport() {
