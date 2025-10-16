@@ -401,7 +401,9 @@ function notes_DryRunWhyZero() {
     const data = sh.getRange(2, 1, last - 1, cols).getValues();
     let seen = 0, ok = 0;
     
-    for (let i = 0; i < data.length; i++) {
+    console.log(`📊 Анализируем ${data.length} строк, колонок: ${cols}`);
+    
+    for (let i = 0; i < Math.min(data.length, 20); i++) { // Показываем первые 20 строк
       const R = i + 2;
       const r = data[i];
       const dealId = r[5];        // F
@@ -420,11 +422,28 @@ function notes_DryRunWhyZero() {
         ok++;
         console.log(`✅ OK-кандидат R=${R}, dealId=${dealId}, V=${!!V}, W=${!!W}`);
       } else {
-        console.log(`⏭️ SKIP R=${R} → ${why.join('; ')}`);
+        console.log(`⏭️ SKIP R=${R} → ${why.join('; ')} (dealId=${dealId}, V=${!!V}, W=${!!W}, AA="${AA}")`);
       }
     }
     
     console.log(`📊 Итог: dealId-строк=${seen}; кандидатов к отправке=${ok}`);
+    
+    // Дополнительная статистика
+    let withV = 0, withW = 0, withBoth = 0, withAA = 0;
+    for (let i = 0; i < data.length; i++) {
+      const r = data[i];
+      const V = r[21];
+      const W = r[22];
+      const AA = String(r[26] || '').trim();
+      
+      if (V) withV++;
+      if (W) withW++;
+      if (V && W) withBoth++;
+      if (AA === 'OK') withAA++;
+    }
+    
+    console.log(`📈 Статистика по колонкам: V=${withV}, W=${withW}, V+W=${withBoth}, AA=OK=${withAA}`);
+    
   } catch (error) {
     console.error('❌ Ошибка диагностики:', error.message);
   }
@@ -441,5 +460,77 @@ function testNotesConfig() {
     });
   } catch (error) {
     console.error('❌ Ошибка конфигурации:', error.message);
+  }
+}
+
+// ---- Проверка конкретных строк ----------------------------------------
+function notes_CheckRows(startRow = 2, count = 10) {
+  try {
+    console.log(`🔍 Проверка строк ${startRow}-${startRow + count - 1}`);
+    
+    const config = getNotesConfig();
+    const sh = SpreadsheetApp.getActive().getSheetByName(config.SHEET_NAME);
+    if (!sh) {
+      console.log('❌ Нет листа', config.SHEET_NAME);
+      return;
+    }
+    
+    for (let i = 0; i < count; i++) {
+      const row = startRow + i;
+      if (row > sh.getLastRow()) break;
+      
+      const dealId = sh.getRange(row, 6).getValue();      // F
+      const V = sh.getRange(row, 22).getValue();          // V
+      const W = sh.getRange(row, 23).getValue();          // W
+      const AA = String(sh.getRange(row, 27).getValue() || '').trim(); // AA
+      
+      console.log(`Строка ${row}:`, {
+        dealId: dealId,
+        V: V ? `"${String(V).slice(0, 50)}..."` : 'пусто',
+        W: W ? `"${String(W).slice(0, 50)}..."` : 'пусто',
+        AA: AA || 'пусто'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Ошибка проверки строк:', error.message);
+  }
+}
+
+// ---- Быстрая диагностика ----------------------------------------------
+function notes_QuickCheck() {
+  try {
+    console.log('⚡ Быстрая диагностика заметок');
+    
+    const config = getNotesConfig();
+    console.log('📋 Конфигурация:', {
+      sheet: config.SHEET_NAME,
+      subdomain: config.AMO_SUBDOMAIN,
+      hasToken: !!config.AMO_TOKEN
+    });
+    
+    const sh = SpreadsheetApp.getActive().getSheetByName(config.SHEET_NAME);
+    if (!sh) {
+      console.log('❌ Лист не найден');
+      return;
+    }
+    
+    const lastRow = sh.getLastRow();
+    const lastCol = sh.getLastColumn();
+    console.log(`📊 Размер листа: ${lastRow} строк, ${lastCol} колонок`);
+    
+    if (lastRow < 2) {
+      console.log('❌ Лист пуст');
+      return;
+    }
+    
+    // Проверяем заголовки
+    const headers = sh.getRange(1, 1, 1, Math.min(lastCol, 30)).getValues()[0];
+    console.log('📋 Заголовки (первые 30):', headers.map((h, i) => `${i+1}:${h}`).join(', '));
+    
+    // Проверяем несколько строк
+    notes_CheckRows(2, 5);
+    
+  } catch (error) {
+    console.error('❌ Ошибка быстрой диагностики:', error.message);
   }
 }
