@@ -81,27 +81,23 @@ function ToProTalkBot() {
     for (const q of requests) {
       try {
         console.log(`Отправка запроса: ${q.substring(0, 50)}...`);
-        console.log(`URL: ${apiUrl}`);
         
         const payload = {
           bot_id: botId,
           chat_id: chatId,
           message: q
         };
-        console.log(`Payload: ${JSON.stringify(payload)}`);
         
         const response = UrlFetchApp.fetch(apiUrl, {
           method: "post",
           contentType: "application/json",
           muteHttpExceptions: true,
-          timeout: TIMEOUT_MS,
-          payload: JSON.stringify(payload)
+          timeout: 30000 // Уменьшенный таймаут - 30 секунд
         });
        
         const responseCode = response.getResponseCode();
         const responseText = response.getContentText();
         console.log(`Код ответа: ${responseCode}`);
-        console.log(`Ответ сервера: ${responseText.substring(0, 200)}...`);
        
         if (responseCode !== 200) {
           throw new Error(`HTTP ${responseCode}: ${responseText}`);
@@ -110,11 +106,15 @@ function ToProTalkBot() {
         const result = JSON.parse(responseText);
         lastResponse = result.done;
         console.log(`Получен ответ: ${lastResponse ? 'OK' : 'ERROR'}`);
-        Utilities.sleep(1000);
+        
+        // Уменьшенная задержка
+        Utilities.sleep(500);
        
       } catch (e) {
         console.error(`Ошибка в запросе: ${e.message}`);
-        throw e; // Пробрасываем в основной catch
+        // Не прерываем выполнение при ошибке одного запроса
+        lastResponse = "Ошибка обработки";
+        break;
       }
     }
    
