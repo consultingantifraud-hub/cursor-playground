@@ -37,6 +37,37 @@ function getConfigFromSheet() {
 
 const config = getConfigFromSheet();
 
+// Простое логирование в консоль и лист LOGS
+function writeLog(message, type = 'INFO') {
+  try {
+    // Логируем в консоль
+    console.log(`[${type}] ${message}`);
+    
+    // Логируем в лист LOGS
+    const spreadsheet = SpreadsheetApp.openById(config.SPREADSHEET_ID);
+    let logSheet = spreadsheet.getSheetByName('LOGS');
+    
+    if (!logSheet) {
+      logSheet = spreadsheet.insertSheet('LOGS');
+      logSheet.getRange('A1:C1').setValues([['Время', 'Тип', 'Сообщение']]);
+      logSheet.getRange('A1:C1').setFontWeight('bold');
+    }
+    
+    const timestamp = new Date();
+    const logData = [timestamp, type, message];
+    logSheet.appendRow(logData);
+    
+    // Ограничиваем количество строк в логах (оставляем последние 500)
+    const maxRows = 500;
+    if (logSheet.getLastRow() > maxRows) {
+      logSheet.deleteRows(2, logSheet.getLastRow() - maxRows);
+    }
+    
+  } catch (error) {
+    console.error('❌ Ошибка записи лога:', error.message);
+  }
+}
+
 // Чтение исключенных полей
 function readExcludedFields(sheet) {
   const excludedRange = sheet.getRange("G2:G");
@@ -224,10 +255,14 @@ function getEntityData(entityType, entityId) {
 // Обработка события
 function processEvent(eventData) {
   try {
+    writeLog(`Обработка события ID: ${eventData.id}`, 'INFO');
     console.log(`📞 Обработка события ID: ${eventData.id}`);
     
     const callNoteId = eventData.value_after?.[0]?.note?.id;
-    if (!callNoteId || isCallProcessed(callNoteId)) return;
+    if (!callNoteId || isCallProcessed(callNoteId)) {
+      writeLog(`Событие ${eventData.id} пропущено (уже обработано или нет ID)`, 'INFO');
+      return;
+    }
 
     let lead;
     switch(eventData.entity_type.toLowerCase()) {
@@ -321,7 +356,9 @@ function processEvent(eventData) {
     ];
     
     appendToSheet(rowData);
+    writeLog(`Событие ${eventData.id} успешно обработано`, 'SUCCESS');
   } catch (error) {
+    writeLog(`Ошибка в событии ID ${eventData.id}: ${error.message}`, 'ERROR');
     console.error(`❌ Ошибка в событии ID ${eventData.id}:`, error.message);
   }
 }
@@ -447,11 +484,14 @@ function appendToSheet(rowData) {
 // Основная функция синхронизации
 function syncEventsToday() {
   try {
+    writeLog('--- Начало синхронизации событий ---', 'INFO');
     console.log('--- Начало синхронизации событий ---');
     
     const timeFrom = Math.floor((new Date().getTime() - 3 * 60 * 1000) / 1000); // 3 минуты
     let url = `https://${config.AMO_SUBDOMAIN}/api/v4/events?filter[created_at][from]=${timeFrom}&limit=250`;
     let allEvents = [];
+    
+    writeLog(`Поиск событий с ${new Date(timeFrom * 1000)}`, 'INFO');
     
     while (true) {
       const response = amoRequest(url);
@@ -461,17 +501,23 @@ function syncEventsToday() {
       if (!url) break;
     }
     
+    writeLog(`Всего событий: ${allEvents.length}`, 'INFO');
     console.log(`Всего событий: ${allEvents.length}`);
     
     const calls = allEvents.filter(e =>
       ['outgoing_call', 'incoming_call'].includes(e.type)
     );
     
+    writeLog(`Найдено звонков: ${calls.length}`, 'INFO');
     console.log(`Найдено звонков: ${calls.length}`);
+    
     calls.forEach(event => processEvent(event));
     
+    writeLog(`Обработано звонков: ${calls.length}`, 'SUCCESS');
+    writeLog('--- Синхронизация завершена ---', 'INFO');
     console.log('--- Синхронизация завершена ---');
   } catch (error) {
+    writeLog(`Ошибка синхронизации: ${error.message}`, 'ERROR');
     console.error('❌ Ошибка синхронизации:', error.message);
   }
 }
