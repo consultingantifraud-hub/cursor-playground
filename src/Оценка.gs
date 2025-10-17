@@ -38,6 +38,12 @@ function ToProTalkBot() {
         rowToProcess = i + 1; // Номер строки в таблице
         break;
       }
+      
+      // Защита от зависания - ограничиваем поиск
+      if (i > 1000) {
+        console.log('Достигнут лимит поиска строк (1000)');
+        break;
+      }
     }
    
     if (!rowToProcess) {

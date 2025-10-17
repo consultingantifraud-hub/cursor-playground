@@ -571,3 +571,12 @@ function quickExport() {
 function fullExport() {
   return massExportCalls(30);
 }
+
+// Тестовая функция для проверки логов
+function testLogging() {
+  writeLog('Тестовое сообщение', 'INFO');
+  writeLog('Тестовое предупреждение', 'WARNING');
+  writeLog('Тестовая ошибка', 'ERROR');
+  writeLog('Тестовый успех', 'SUCCESS');
+  console.log('✅ Тестовые логи записаны в лист LOGS');
+}
